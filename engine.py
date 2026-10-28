@@ -430,7 +430,7 @@ def decidir(x, refs):
             "Sem aluguel observado: relação sugerida PROPRIETÁRIO; faixa representa aluguel de reposição/perda de aluguel de referência.",
             "Confirmar se o estabelecimento é próprio, alugado (valor do aluguel) ou cedido", "Se próprio e sem locação a terceiros, a cobertura pode ter pouca utilidade")
     k = RC_FATOR.get(x.grupo_atividade, 3)
-    add("RESPONSABILIDADE_CIVIL_ESTABELECIMENTO", max(50000, 0.5 * k * fat), min(2_000_000, max(100000, 1.5 * k * fat)), minc(c_fat, "MEDIA"),
+    add("RESPONSABILIDADE_CIVIL_ESTABELECIMENTO", min(2_000_000, max(50000, 0.5 * k * fat)), min(2_000_000, max(100000, 1.5 * k * fat)), minc(c_fat, "MEDIA"),
         f"faturamento alocado à unidade (R$ {fat:.0f}/mês, rateio por folha), grupo_atividade={x.grupo_atividade}",
         f"min = {0.5*k:.1f} × faturamento mensal da unidade; max = {1.5*k:.1f} × (teto 2 mi); piso 50k/100k",
         "Limite proporcional ao fluxo de público da atividade e ao porte da unidade.", "Fluxo diário de clientes e eventuais sinistros anteriores")
@@ -441,7 +441,7 @@ def decidir(x, refs):
         "Despesas fixas mensais reais e prazo máximo de reabertura",
         "Despesa fixa > faturamento mensal da empresa: revisar" if incons_fin else "")
     base_dig = fat * max(x.percentual_recebimentos_digitais, x.indice_receita_digital)
-    add("PROTECAO_CIBERNETICA", max(20000, base_dig), min(1_000_000, max(50000, 3 * base_dig * (1 + x.indice_exposicao_digital))), "BAIXA" if c_fat == "MEDIA" else "MEDIA",
+    add("PROTECAO_CIBERNETICA", min(1_000_000, max(20000, base_dig)), min(1_000_000, max(50000, 3 * base_dig * (1 + x.indice_exposicao_digital))), "BAIXA" if c_fat == "MEDIA" else "MEDIA",
         "percentual_recebimentos_digitais, indice_receita_digital, indice_exposicao_digital, faturamento da unidade",
         "min = max(20k; 1 mês de receita digital); max = max(50k; 3 meses de receita digital × (1+exposição digital)); teto 1 mi",
         f"Receita digital estimada R$ {base_dig:.0f}/mês; exposição digital {x.indice_exposicao_digital:.2f} (referência de dependência, não probabilidade de ataque).",
@@ -463,7 +463,7 @@ def decidir(x, refs):
             "Sem enriquecimento territorial (INMET/Defesa Civil); faixas sensíveis ao tipo de local", dest=dst)
     if "TOTAL" in (plano, alt_plano):
         dst = None if plano == "TOTAL" else C_alt
-        add("RESPONSABILIDADE_CIVIL_EMPREGADOR", max(50000, 10000 * n), min(2_000_000, max(100000, 40000 * n)), "MEDIA",
+        add("RESPONSABILIDADE_CIVIL_EMPREGADOR", min(2_000_000, max(50000, 10000 * n)), min(2_000_000, max(100000, 40000 * n)), "MEDIA",
             f"quantidade de funcionários alocada à unidade ({n}); folha da unidade", "min = max(50k; 10k × empregados); max = max(100k; 40k × empregados); teto 2 mi",
             "Limite proporcional ao número de empregados na unidade.", "Número real de empregados (CLT/terceiros) no estabelecimento",
             "Funcionários da empresa rateados por folha entre unidades" if x.multi else "", dest=dst)

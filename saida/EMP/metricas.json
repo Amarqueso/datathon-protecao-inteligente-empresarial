@@ -6,8 +6,8 @@
   "elegiveis": 2848,
   "inelegiveis": 130,
   "inelegiveis_por_motivo": {
-    "Imóvel em construção/reforma/reconstrução (situacao_imovel_cadastral=EM_OBRA)": 78,
-    "Situação cadastral IRREGULAR do imóvel (possível imóvel condenado/desapropriado/tombado)": 52
+    "ImÃ³vel em construÃ§Ã£o/reforma/reconstruÃ§Ã£o (situacao_imovel_cadastral=EM_OBRA)": 78,
+    "SituaÃ§Ã£o cadastral IRREGULAR do imÃ³vel (possÃ­vel imÃ³vel condenado/desapropriado/tombado)": 52
   },
   "distribuicao_planos": {
     "PRATICO": 2125,
@@ -34,5 +34,5 @@
     "n_known": 1140
   },
   "casos_multiunidade": 956,
-  "tempo_execucao_s": 14.91
+  "tempo_execucao_s": 2.33
 }
