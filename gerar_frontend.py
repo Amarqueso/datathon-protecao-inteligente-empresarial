@@ -18,6 +18,8 @@ from flask import Flask, jsonify, request, send_file
 from openai import OpenAI
 from dotenv import load_dotenv
 
+import engine as E
+
 load_dotenv()
 MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
 app = Flask(__name__)
@@ -115,6 +117,32 @@ details{margin:7px 0 0}summary{cursor:pointer;color:var(--ac);font-size:11px;fon
 footer{padding:22px 20px 30px;text-align:center;color:#77839a;font-size:11px;max-width:1000px;margin:auto;line-height:1.7}
 @media print{body{background:#fff}header{box-shadow:none}main{display:block;padding:12px}.card{box-shadow:none;margin-bottom:14px;break-inside:avoid}.list{max-height:none;overflow:visible}th{position:static}footer{padding:12px}}
 
+.resumo{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:6px 0 12px}
+.resumo>div{background:#f7f9fd;border:1px solid var(--bd);border-radius:10px;padding:10px 12px;font-size:12px}
+.resumo span{display:block;color:var(--mut);font-size:10px;text-transform:uppercase;letter-spacing:.07em;font-weight:700;margin-bottom:4px}
+.resumo b{font-size:15px}
+@media(max-width:620px){.resumo{grid-template-columns:1fr}}
+.atd-note{font-size:12px;margin:8px 0}
+.atd-form{border:1px solid #cfe0ff;background:#f6f9ff;border-radius:12px;padding:12px 14px}
+.atd-q{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid #e4ebf7;font-size:12px}
+.atd-q:last-of-type{border-bottom:0}
+.atd-in{display:flex;gap:6px;flex-wrap:wrap}.atd-in>*{flex:1;min-width:120px}
+@media(max-width:620px){.atd-q{grid-template-columns:1fr}}
+.atd-extra summary{margin-top:6px}
+.atd-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.atd-actions button{border:0;border-radius:9px;padding:9px 14px;background:var(--ac);color:#fff;font:inherit;font-size:12px;font-weight:700;cursor:pointer}
+.atd-actions button.sec{background:#fff;color:var(--ac);border:1px solid #c9d7f0}
+.atd-actions button:disabled{opacity:.55;cursor:wait}
+.chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:10px;font-size:11px}
+.chip{background:#e8f5ee;border:1px solid #bfe3cf;color:#145c38;border-radius:999px;padding:3px 4px 3px 10px}
+.chip button{border:0;background:none;color:#145c38;cursor:pointer;font-size:11px;padding:0 5px}
+.dl{font-size:10px;color:var(--wa);font-weight:700;margin-left:4px;white-space:nowrap}.dl.up{color:var(--ok)}
+.alt{border:1px dashed #c9d7f0;border-radius:10px;padding:12px 14px;font-size:12px}.alt p{margin:8px 0}.alt table{min-width:0!important}
+.org{display:inline-block;padding:2px 7px;border-radius:999px;font-size:10px;font-weight:750;letter-spacing:.03em}
+.org-OBSERVADO{background:#e7efff;color:#0038a8}.org-DERIVADO{background:#eef0f4;color:#4b5568}
+.org-ESTIMADO{background:#fff4dc;color:#8a4b00}.org-CONFIRMADO{background:#e3f6ea;color:#167647}
+tr.conf td{background:#f4fbf6}
+
 #ai-chat-card{grid-column:1/-1}
 #ai-chat-card h2{margin-bottom:12px}
 .ai-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;font-size:12px}
@@ -168,57 +196,134 @@ footer{padding:22px 20px 30px;text-align:center;color:#77839a;font-size:11px;max
 <script>
 
 const D=__DATA__;
-
 const $=s=>document.querySelector(s);
-
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-
 const brl=n=>new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(n);
-
 const cc={ALTA:"ok",MEDIA:"wa",BAIXA:"no"},pc={ESSENCIAL:"#9fb0d6",PRATICO:"#0038a8",TOTAL:"#e0b800"};
-
+const DS=(new URLSearchParams(location.search).get("dataset")||D.tag).toUpperCase();
 $("#sub").textContent=D.titulo+" · "+D.casos.length+" estabelecimentos · dados fictícios";
-
 const uniq=k=>[...new Set(D.casos.map(c=>c[k]).filter(Boolean))].sort();
-
 uniq("plano").forEach(v=>$("#fp").add(new Option(v,v)));uniq("conf").forEach(v=>$("#fc").add(new Option(v,v)));
 
 function kpis(L){const el=L.filter(c=>c.elegivel==="SIM"),n=a=>a.length,cnt=p=>el.filter(c=>c.plano===p).length;
-
-$("#kpis").innerHTML=[[n(L),"casos"],[n(el),"elegíveis"],[n(L)-n(el),"inelegíveis"],[el.filter(c=>c.conf==="BAIXA").length,"confiança baixa"]].map(([a,b])=>\`<div class="kpi"><b>${a}</b><span>${b}</span></div>\`).join("");
-
-$("#bar").innerHTML=\`<div class="bar">${["ESSENCIAL","PRATICO","TOTAL"].map(p=>\`<div style="width:${n(el)?100\*cnt(p)/n(el):0}%;background:${pc[p]}"></div>\`).join("")}</div><span class="muted">${["ESSENCIAL","PRATICO","TOTAL"].map(p=>p+" "+cnt(p)).join(" · ")}</span>\`}
+$("#kpis").innerHTML=[[n(L),"casos"],[n(el),"elegíveis"],[n(L)-n(el),"inelegíveis"],[el.filter(c=>c.conf==="BAIXA").length,"confiança baixa"]].map(([a,b])=>`<div class="kpi"><b>${a}</b><span>${b}</span></div>`).join("");
+$("#bar").innerHTML=`<div class="bar">${["ESSENCIAL","PRATICO","TOTAL"].map(p=>`<div style="width:${n(el)?100*cnt(p)/n(el):0}%;background:${pc[p]}"></div>`).join("")}</div><span class="muted">${["ESSENCIAL","PRATICO","TOTAL"].map(p=>p+" "+cnt(p)).join(" · ")}</span>`}
 
 function lista(){const q=$("#q").value.toLowerCase(),fp=$("#fp").value,fe=$("#fe").value,fc=$("#fc").value;
-
 const L=D.casos.filter(c=>(!q||(c.imovel+" "+c.ativ+" "+c.mun).toLowerCase().includes(q))&&(!fp||c.plano===fp)&&(!fe||c.elegivel===fe)&&(!fc||c.conf===fc));
+kpis(L);$("#rows").innerHTML=L.map(c=>`<tr data-i="${esc(c.imovel)}"><td>${esc(c.imovel)}</td><td>${esc(c.ativ)}</td><td>${esc(c.mun)}/${esc(c.uf)}</td><td>${c.elegivel==="SIM"?`<span class="tag">${esc(c.plano)}</span>`:`<span class="tag no">inelegível</span>`}</td><td class="${cc[c.conf]||""}">${esc(c.conf)}</td></tr>`).join("")}
 
-kpis(L);$("#rows").innerHTML=L.map(c=>\`<tr data-i="${esc(c.imovel)}"><td>${esc(c.imovel)}</td><td>${esc(c.ativ)}</td><td>${esc(c.mun)}/${esc(c.uf)}</td><td>${c.elegivel==="SIM"?\`<span class="tag">${esc(c.plano)}</span>\`:\`<span class="tag no">inelegível</span>\`}</td><td class="${cc[c.conf]||""}">${esc(c.conf)}</td></tr>\`).join("")}
+function cabecalho(c){return `<h2>${esc(c.imovel)} <span class="muted">· ${esc(c.ativ)} · ${esc(c.mun)}/${esc(c.uf)} · ${esc(c.porte)}</span></h2>`}
+const justHtml=t=>`<div class="just">${String(t||"").split(/(?=\[(?:DISPON|SUGEST|CONFIRM))/).map(t=>`<span>${esc(t.trim())}</span>`).join("")}</div>`;
+const calc=k=>`<details><summary>como foi calculado</summary><div class="det"><b>Dados:</b> ${esc(k.dados)}<br><b>Regra:</b> ${esc(k.regra)}<br><b>Por quê:</b> ${esc(k.just??k.justificativa)}<br><b>Confirmar:</b> ${esc(k.confirmar??k.a_confirmar)}${(k.obs??k.observacao)?`<br><b>Obs.:</b> ${esc(k.obs??k.observacao)}`:""}</div></details>`;
 
-function detalhe(id){const c=D.casos.find(x=>x.imovel===id);document.querySelectorAll("tr.sel").forEach(r=>r.classList.remove("sel"));
+// Visão estática (sem servidor): o que está nos templates do lote.
+function estatico(c){
+let h=cabecalho(c)+`<p>Local: <b>${esc(c.tipo_local)}</b> · Relação sugerida: <b>${esc(c.relacao)}</b> · Confiança: <b class="${cc[c.conf]||""}">${esc(c.conf)}</b></p>`;
+if(c.elegivel!=="SIM")h+=`<p class="no"><b>Não elegível:</b> ${esc(c.motivo)}</p>`;else h+=`<p>Plano recomendado: <span class="tag" style="border-color:${pc[c.plano]}">${esc(c.plano)}</span></p>`;
+h+=`<div id="atd-status" class="atd-note muted">Carregando atendimento assistido…</div>`;
+h+=`<h3>Justificativa</h3>`+justHtml(c.just);
+h+=`<h3>Perguntas de confirmação (${c.perguntas.length})</h3><ol class="q">${c.perguntas.map(p=>`<li>${esc(p)}</li>`).join("")}</ol>`;
+if(c.cob.length){h+=`<h3>Coberturas e faixas</h3><div class="tw"><table><thead><tr><th>Cobertura</th><th class="n">Mínimo</th><th class="n">Máximo</th><th>Conf.</th></tr></thead><tbody>`+
+c.cob.map(k=>`<tr><td>${esc(k.nome)}${calc(k)}</td><td class="n">${brl(k.min)}</td><td class="n">${brl(k.max)}</td><td class="${cc[k.conf]||""}">${esc(k.conf)}</td></tr>`).join("")+`</tbody></table></div>`}
+return h}
 
-const tr=document.querySelector(\`tr[data-i="${CSS.escape(id)}"]\`);tr&&tr.classList.add("sel");
+// ---------------- atendimento assistido: motor via API, confirmação e recálculo ----------------
+let atd=null; // {id, base, json, respostas, erro}
+const ROTULO={tipo_local:"Tipo de local",relacao_imovel:"Relação com o imóvel",aluguel_mensal:"Aluguel mensal",area_m2:"Área",faturamento_mensal_unidade:"Faturamento mensal (unidade)",
+empregados_unidade:"Empregados (unidade)",estoque_medio:"Estoque médio",estoque_pico:"Estoque de pico",despesa_fixa_mensal:"Despesa fixa mensal",refrigeracao:"Refrigeração",
+delivery:"Delivery",valores_em_caixa:"Valores em caixa",endereco_cnpj_compativel:"Endereço confere com o CNPJ",bens_vinculados:"Bens vinculados",
+condicoes_aceitacao_local:"Condições de aceitação do local",elegibilidade_local:"Condições de aceitação do local",bens_baixa_confianca:"Bens de vínculo baixo no endereço",endereco_cnpj:"Endereço confere com o CNPJ",faturamento_despesas:"Financeiro",impedimento_resolvido:"Impedimento resolvido",valor_reposicao:"Valor de reposição"};
+const DINHEIRO=new Set(["aluguel_mensal","faturamento_mensal_unidade","estoque_medio","estoque_pico","despesa_fixa_mensal","valor_reposicao"]);
+const AJUSTES=[["refrigeracao","Há refrigeração com mercadorias perecíveis?"],["delivery","A empresa faz entregas (delivery)?"],["valores_em_caixa","Mantém valores relevantes em caixa/cofre?"]];
+const fmtSinal=(k,s)=>{const v=s.valor;if(typeof v==="boolean")return v?"Sim":"Não";if(DINHEIRO.has(k)&&typeof v==="number")return brl(v);
+if(k==="area_m2")return Math.round(v)+" m²"+(s.faixa?` <span class="muted">(${s.faixa[0]}–${s.faixa[1]})</span>`:"");
+if(k==="bens_vinculados"&&s.pct_valor_baixa_confianca!=null)return v+` <span class="muted">(${Math.round(100*s.pct_valor_baixa_confianca)}% do valor com vínculo baixo)</span>`;
+if(v&&typeof v==="object")return esc(Object.values(v).join(" · "));return esc(v)};
+const fmtResp=v=>v===true?"Sim":v===false?"Não":(v&&typeof v==="object")?Object.entries(v).sort(([a],[b])=>a==="relacao"?-1:b==="relacao"?1:a.localeCompare(b)).map(([k,x])=>typeof x==="number"?k.replaceAll("_"," ")+" "+brl(x):x).join(" · "):v;
+const origem=o=>`<span class="org org-${esc(o)}">${esc(o)}</span>`;
 
-let h=\`<h2>${esc(c.imovel)} <span class="muted">· ${esc(c.ativ)} · ${esc(c.mun)}/${esc(c.uf)} · ${esc(c.porte)}</span></h2>
+async function api(url,opt){const r=await fetch(url,opt);const j=await r.json().catch(()=>({error:"Resposta inválida do servidor."}));if(!r.ok)throw new Error(j.error||("Erro "+r.status));return j}
 
-<p>Local: <b>${esc(c.tipo_local)}</b> · Relação sugerida: <b>${esc(c.relacao)}</b> · Confiança: <b class="${cc[c.conf]||""}">${esc(c.conf)}</b></p>\`;
+async function abrirAtendimento(id){
+if(location.protocol==="file:"){$("#atd-status").textContent="Para confirmar respostas e recalcular, abra a página pelo servidor (python gerar_frontend.py).";return}
+try{const j=await api(`/api/caso/${encodeURIComponent(id)}?dataset=${DS}`);
+if(sel!==id)return;atd={id,base:j,json:j,respostas:{},erro:""};render()}
+catch(e){if(sel===id)$("#atd-status").textContent="Atendimento assistido indisponível: "+e.message}}
 
-if(c.elegivel!=="SIM")h+=\`<p class="no"><b>Não elegível:</b> ${esc(c.motivo)}</p>\`;else h+=\`<p>Plano recomendado: <span class="tag" style="border-color:${pc[c.plano]}">${esc(c.plano)}</span></p>\`;
+function coletar(){const r={...atd.respostas};
+document.querySelectorAll("#det [data-q]").forEach(el=>{const id=el.dataset.q,campo=el.dataset.campo,v=el.value.trim();if(v==="")return;
+if(campo){r[id]=(r[id]&&typeof r[id]==="object")?{...r[id]}:{};r[id][campo]=el.type==="number"?Number(v):v}else r[id]=el.type==="number"?Number(v):v});
+if(r.relacao_imovel&&typeof r.relacao_imovel==="object"&&!r.relacao_imovel.relacao)delete r.relacao_imovel;
+return r}
 
-h+=\`<h3>Justificativa</h3><div class="just">${c.just.split(/(?=\[(?:DISPON|SUGEST|CONFIRM))/).map(t=>\`<span>${esc(t.trim())}</span>\`).join("")}</div>\`;
+async function recalcular(respostas){
+const btn=$("#atd-recalc");if(btn){btn.disabled=true;btn.textContent="Recalculando…"}
+try{const j=await api(`/api/caso/${encodeURIComponent(atd.id)}/confirmar`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({dataset:DS,respostas})});
+atd.json=j;atd.respostas=j.respostas_aplicadas||{};atd.erro=""}
+catch(e){atd.erro=e.message}
+render()}
 
-h+=\`<h3>Perguntas de confirmação (${c.perguntas.length})</h3><ol class="q">${c.perguntas.map(p=>\`<li>${esc(p)}</li>\`).join("")}</ol>\`;
+function campoPergunta(p){
+if(p.id==="relacao_imovel")return `<select data-q="relacao_imovel" data-campo="relacao"><option value="">—</option>${(p.opcoes||[]).map(o=>`<option>${o}</option>`).join("")}</select><input data-q="relacao_imovel" data-campo="aluguel_mensal" type="number" min="0" step="100" placeholder="Aluguel mensal (R$), se alugado">`;
+if(p.campos)return p.campos.map(c=>`<input data-q="${esc(p.id)}" data-campo="${esc(c)}" type="number" min="0" step="100" placeholder="${esc(c.replaceAll("_"," "))} (R$)">`).join("");
+if(p.tipo==="numero")return `<input data-q="${esc(p.id)}" type="number" min="0" step="any" placeholder="valor">`;
+return `<select data-q="${esc(p.id)}"><option value="">—</option><option value="SIM">Sim</option><option value="NAO">Não</option></select>`}
 
-if(c.cob.length){h+=\`<h3>Coberturas e faixas</h3><div class="tw"><table><thead><tr><th>Cobertura</th><th class="n">Mínimo</th><th class="n">Máximo</th><th>Conf.</th></tr></thead><tbody>\`+
+function render(){
+const j=atd.json,b=atd.base,c=D.casos.find(x=>x.imovel===atd.id)||{imovel:atd.id};
+const mudou=(a,z)=>a!==z?` <span class="muted">(antes: ${esc(a??"inelegível")})</span>`:"";
+let h=cabecalho(c);
+h+=`<div class="resumo"><div><span>Elegível</span><b class="${j.elegivel?"ok":"no"}">${j.elegivel?"SIM":"NÃO"}</b>${b.elegivel!==j.elegivel?` <span class="muted">(antes: ${b.elegivel?"SIM":"NÃO"})</span>`:""}</div>`+
+`<div><span>Plano</span>${j.plano?`<b class="tag" style="border-color:${pc[j.plano]}">${esc(j.plano)}</b>`:"<b>—</b>"}${mudou(b.plano,j.plano)}</div>`+
+`<div><span>Confiança geral</span><b class="${cc[j.confianca_geral]||""}">${esc(j.confianca_geral)}</b>${mudou(b.confianca_geral,j.confianca_geral)}</div></div>`;
+if(!j.elegivel)h+=`<p class="no"><b>Não elegível:</b> ${esc(j.motivos_inelegibilidade.join("; "))}${j.direcionamento?` · direcionar para ${esc(j.direcionamento.replaceAll("_"," "))}`:""}</p>`;
+else h+=`<p><b>Por que ${esc(j.plano)}:</b> ${esc(j.motivos_plano.join("; "))}.<br><span class="muted">Assistências do plano: ${esc(j.assistencias.join(", "))}</span></p>`;
 
-c.cob.map(k=>\`<tr><td>${esc(k.nome)}<details><summary>como foi calculado</summary><div class="det"><b>Dados:</b> ${esc(k.dados)}<br><b>Regra:</b> ${esc(k.regra)}<br><b>Por quê:</b> ${esc(k.just)}<br><b>Confirmar:</b> ${esc(k.confirmar)}${k.obs?\`<br><b>Obs.:</b> ${esc(k.obs)}\`:""}</div></details></td><td class="n">${brl(k.min)}</td><td class="n">${brl(k.max)}</td><td class="${cc[k.conf]||""}">${esc(k.conf)}</td></tr>\`).join("")+\`</tbody></table></div>\`}
+// confirmação
+h+=`<h3>Confirmação com o cliente</h3><div class="atd-form">`;
+if(j.perguntas.length)h+=j.perguntas.map(p=>`<div class="atd-q"><label>${esc(p.texto)}</label><div class="atd-in">${campoPergunta(p)}</div></div>`).join("");
+else h+=`<p class="muted">Nenhuma pergunta pendente.</p>`;
+const extras=AJUSTES.filter(([id])=>j.elegivel&&!j.perguntas.some(p=>p.id===id)&&!(id in atd.respostas));
+if(extras.length)h+=`<details class="atd-extra"><summary>Outros ajustes do gerente (${extras.length})</summary>${extras.map(([id,t])=>`<div class="atd-q"><label>${t}</label><div class="atd-in">${campoPergunta({id,tipo:"booleano"})}</div></div>`).join("")}</details>`;
+const resp=Object.entries(atd.respostas);
+if(resp.length)h+=`<div class="chips"><span class="muted">Respostas confirmadas:</span>${resp.map(([k,v])=>`<span class="chip">${esc(ROTULO[k]||k)}: <b>${esc(k==="area_m2"?v+" m²":k==="valor_reposicao"?brl(v):fmtResp(v))}</b> <button type="button" data-rm="${esc(k)}" title="Desfazer">✕</button></span>`).join("")}</div>`;
+if(atd.erro)h+=`<p class="no">${esc(atd.erro)}</p>`;
+h+=`<div class="atd-actions"><button id="atd-recalc" type="button">Confirmar e recalcular</button>${resp.length?`<button id="atd-reset" type="button" class="sec">Voltar à sugestão inicial</button>`:""}</div></div>`;
 
-$("#det").innerHTML=h}
+// coberturas com comparação contra a sugestão inicial
+if(j.coberturas.length){const B=Object.fromEntries(b.coberturas.map(k=>[k.nome,k]));
+const delta=k=>{const o=B[k.nome];if(!o)return `<span class="dl up">nova</span>`;if(o.min===k.min&&o.max===k.max)return "";return `<span class="dl">antes ${brl(o.min)} – ${brl(o.max)}</span>`};
+h+=`<h3>Coberturas e faixas</h3><div class="tw"><table><thead><tr><th>Cobertura</th><th>Grupo</th><th class="n">Mínimo</th><th class="n">Máximo</th><th>Conf.</th></tr></thead><tbody>`+
+j.coberturas.map(k=>`<tr><td>${esc(k.nome)} ${delta(k)}${calc(k)}</td><td class="muted">${esc(k.grupo.replaceAll("_"," ").toLowerCase())}</td><td class="n">${brl(k.min)}</td><td class="n">${brl(k.max)}</td><td class="${cc[k.confianca]||""}">${esc(k.confianca)}</td></tr>`).join("")+`</tbody></table></div>`;
+const saiu=b.coberturas.filter(k=>!j.coberturas.some(x=>x.nome===k.nome)).map(k=>k.nome);
+if(saiu.length&&j.elegivel)h+=`<p class="muted">Saíram após a confirmação: ${esc(saiu.join(", "))}</p>`}
+
+// alternativa
+if(j.alternativa){const a=j.alternativa;
+h+=`<h3>Comparar com a alternativa</h3><div class="alt"><div><span class="tag" style="border-color:${pc[a.plano]}">${esc(a.plano)}</span> <span class="muted">${esc(a.sentido)}</span></div><p>${esc(a.tradeoff)}</p>`+
+(a.coberturas_adicionadas.length?`<table><tbody>${a.coberturas_adicionadas.map(k=>`<tr><td>+ ${esc(k.nome)}</td><td class="n">${brl(k.min)}</td><td class="n">${brl(k.max)}</td></tr>`).join("")}</tbody></table>`:"")+
+(a.coberturas_removidas.length?`<p class="muted">Sem: ${esc(a.coberturas_removidas.join(", "))}</p>`:"")+
+`<p class="muted">Assistências: ${esc(a.assistencias.join(", "))}</p></div>`}
+
+// sinais com origem
+const S=Object.entries(j.sinais||{});
+if(S.length)h+=`<h3>Dados utilizados e origem</h3><div class="tw"><table><thead><tr><th>Dado</th><th>Valor</th><th>Origem</th><th>Fonte</th></tr></thead><tbody>`+
+S.map(([k,s])=>`<tr class="${s.origem==="CONFIRMADO"?"conf":""}"><td>${esc(ROTULO[k]||k)}</td><td>${fmtSinal(k,s)}</td><td>${origem(s.origem)}</td><td class="muted">${esc(s.fonte)}</td></tr>`).join("")+`</tbody></table></div>`;
+h+=`<h3>Justificativa</h3>`+justHtml(j.justificativa);
+$("#det").innerHTML=h;
+$("#atd-recalc").onclick=()=>recalcular(coletar());
+const rs=$("#atd-reset");rs&&(rs.onclick=()=>{atd.respostas={};atd.json=atd.base;atd.erro="";render()});
+document.querySelectorAll("#det [data-rm]").forEach(x=>x.onclick=()=>{const r={...atd.respostas};delete r[x.dataset.rm];
+if(Object.keys(r).length)recalcular(r);else{atd.respostas={};atd.json=atd.base;atd.erro="";render()}})}
+
+let sel=null;
+function detalhe(id){const c=D.casos.find(x=>x.imovel===id);sel=id;atd=null;document.querySelectorAll("tr.sel").forEach(r=>r.classList.remove("sel"));
+const tr=document.querySelector(`tr[data-i="${CSS.escape(id)}"]`);tr&&tr.classList.add("sel");
+$("#det").innerHTML=estatico(c);abrirAtendimento(id)}
 
 ["q","fp","fe","fc"].forEach(i=>$("#"+i).addEventListener("input",lista));
-
 $("#rows").addEventListener("click",e=>{const t=e.target.closest("tr");t&&detalhe(t.dataset.i)});
-
 lista();
 
 </script><footer>Protótipo desenvolvido para o Datathon Proteção Inteligente · dados fictícios · as faixas são estimativas e dependem de confirmação do cliente</footer><script>
@@ -300,7 +405,7 @@ def main(tag):
 
                           perguntas=[p.strip() for p in str(r.perguntas_confirmacao).split(" | ") if p.strip()], cob=lst))
 
-    data = json.dumps(dict(titulo="Base " + ("comum de teste" if tag == "CASO" else "de desenvolvimento"), casos=casos), ensure_ascii=False).replace("</", "<\\\\/")
+    data = json.dumps(dict(titulo="Base " + ("comum de teste" if tag == "CASO" else "de desenvolvimento"), tag=tag, casos=casos), ensure_ascii=False).replace("</", "<\\\\/")
 
     out = os.path.join(BASE, f"frontend_{tag}.html")
 
@@ -433,6 +538,48 @@ def api_status():
     return jsonify(status)
 
 
+# ============================ atendimento assistido (motor ao vivo) ============================
+_MOTOR = {}
+
+
+def motor(tag):
+    """Carrega a base e as referências uma vez por conjunto; cada caso é recalculado pelo motor."""
+    if tag not in _MOTOR:
+        d, bens, _, _ = E.carregar(E.DATASETS[tag])
+        _MOTOR[tag] = (d, bens, E.carregar_referencias(tag))
+    return _MOTOR[tag]
+
+
+def _caso(imovel_id, tag, respostas=None):
+    if tag not in PASTA:
+        return jsonify({"error": "Conjunto inválido. Use CASO ou EMP."}), 400
+    try:
+        d, bens, refs = motor(tag)
+        if imovel_id not in set(d.imovel_id):
+            return jsonify({"error": f"Estabelecimento {imovel_id} não encontrado em {tag}."}), 404
+        j = E.recomendar_imovel(imovel_id, d, bens, refs, respostas)
+    except FileNotFoundError as exc:
+        return jsonify({"error": "Arquivo não encontrado. Execute o engine.py para gerar as referências. " + str(exc)}), 400
+    except ValueError as exc:  # resposta inválida do cliente/gerente
+        return jsonify({"error": str(exc)}), 400
+    j.pop("template")
+    return jsonify(j)
+
+
+@app.get("/api/caso/<imovel_id>")
+def api_caso(imovel_id):
+    return _caso(imovel_id, request.args.get("dataset", "CASO").upper())
+
+
+@app.post("/api/caso/<imovel_id>/confirmar")
+def api_confirmar(imovel_id):
+    body = request.get_json(silent=True) or {}
+    respostas = body.get("respostas")
+    if not isinstance(respostas, dict):
+        return jsonify({"error": "Envie as respostas como objeto: {\"respostas\": {\"area_m2\": 120}}."}), 400
+    return _caso(imovel_id, str(body.get("dataset", "CASO")).upper(), respostas)
+
+
 @app.post("/api/chat")
 def api_chat():
     body = request.get_json(silent=True) or {}
@@ -476,9 +623,28 @@ def api_chat():
         return jsonify({"answer": resposta.output_text or "Não consegui gerar uma resposta."})
     except FileNotFoundError as exc:
         return jsonify({"error": "Arquivo não encontrado. Execute o engine.py para gerar os resultados. " + str(exc)}), 400
-    except Exception:
+    except Exception as exc:
         app.logger.exception("Erro ao consultar a API OpenAI")
-        return jsonify({"error": "Falha ao consultar a API. Confira a chave, o nome do modelo e o terminal do servidor."}), 502
+        return jsonify({"error": mensagem_erro_api(exc)}), 502
+
+
+def mensagem_erro_api(exc):
+    """Traduz o erro da OpenAI numa mensagem que diga a causa real ao usuário."""
+    import openai
+    if isinstance(exc, openai.RateLimitError):
+        if getattr(exc, "code", None) == "insufficient_quota" or "credits" in str(exc).lower():
+            return ("A conta da OpenAI está sem créditos (erro 429). Adicione créditos em "
+                    "platform.openai.com/settings/organization/billing ou use a chave de outra conta.")
+        return "Limite de requisições da OpenAI atingido (erro 429). Aguarde alguns segundos e tente de novo."
+    if isinstance(exc, openai.AuthenticationError):
+        return "Chave OPENAI_API_KEY inválida ou revogada (erro 401). Confira o arquivo .env."
+    if isinstance(exc, openai.PermissionDeniedError):
+        return f"A chave não tem acesso ao modelo {MODEL} (erro 403). Troque OPENAI_MODEL no .env."
+    if isinstance(exc, openai.NotFoundError):
+        return f"Modelo {MODEL} não encontrado (erro 404). Confira OPENAI_MODEL no .env."
+    if isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError)):
+        return "Não foi possível conectar à OpenAI. Verifique a internet e tente de novo."
+    return "Falha ao consultar a API. Veja o erro completo no terminal do servidor."
 
 
 if __name__ == "__main__":
