@@ -26,6 +26,12 @@ Thumbs.db
 # Para versionar, apague estas duas linhas.
 teste_comum/
 desenvolvimento/
+# Sem barra final: cobre também os atalhos (symlinks) para dados/
+/teste_comum
+/desenvolvimento
+
+# ---------- Informações para a IA (local) ----------
+dados/
 
 # ---------- Arquivos gerados pesados ----------
 # O front da base de desenvolvimento passa de 17 MB.
