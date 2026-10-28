@@ -61,27 +61,6 @@ def tipo_local(row):
     return "INDEFINIDO"
 
 
-def impute_area(df):
-    """Regressão log-linear (OLS) da área nos casos com área de laudo; fallback por atividade."""
-    known = df.area_cadastrada_m2 > 0
-    def X(d):
-        cols = [np.ones(len(d)), np.log1p(d.energia_media_mensal_6m), np.log1p(d.folha_pagamento_mensal)]
-        for a in sorted(df.grupo_atividade.unique())[1:]: cols.append((d.grupo_atividade == a).astype(float))
-        for t in sorted(df.tipo_loc.unique())[1:]: cols.append((d.tipo_loc == t).astype(float))
-        return np.column_stack(cols)
-    Xk, yk = X(df[known]), np.log(df.loc[known, "area_cadastrada_m2"].values)
-    beta, *_ = np.linalg.lstsq(Xk, yk, rcond=None)
-    res = yk - Xk @ beta
-    sd = float(res.std(ddof=Xk.shape[1])) if known.sum() > Xk.shape[1] + 5 else 0.6
-    r2 = 1 - res.var() / yk.var()
-    pred = np.exp(X(df) @ beta)
-    amed = np.where(known, df.area_cadastrada_m2, pred)
-    amin = np.where(known, df.area_cadastrada_m2 * 0.9, pred * np.exp(-sd))
-    amax = np.where(known, df.area_cadastrada_m2 * 1.1, pred * np.exp(sd))
-    clip = lambda a: np.clip(a, 15, 1500)
-    return clip(amed), clip(amin), clip(amax), dict(r2_log=round(float(r2), 3), sd_log=round(sd, 3), n_known=int(known.sum()))
-
-
 def carregar(cfg):
     L = lambda k: pd.read_csv(os.path.join(UP, cfg["pasta"], cfg[k] + ".csv"))
     emp, end, sin, ter, bens, tpl = (L(k) for k in ["emp", "end", "sin", "ter", "bens", "tpl"])
@@ -90,10 +69,87 @@ def carregar(cfg):
     return d, bens, tpl, ter
 
 
-def processar(tag):
-    t0 = time.time()
-    cfg = DATASETS[tag]
-    d, bens, tpl, ter = carregar(cfg)
+# ============================ referências (aprendidas da base, 1 vez) ============================
+def _X_area(d, ref):
+    cols = [np.ones(len(d)), np.log1p(d.energia_media_mensal_6m), np.log1p(d.folha_pagamento_mensal)]
+    for a in ref["atividades"]: cols.append((d.grupo_atividade == a).astype(float))
+    for t in ref["tipos"]: cols.append((d.tipo_loc == t).astype(float))
+    return np.column_stack(cols)
+
+
+def ajustar_area(df):
+    """Regressão log-linear (OLS) da área nos casos com área de laudo; fallback por atividade."""
+    known = df.area_cadastrada_m2 > 0
+    ref = dict(atividades=[str(a) for a in sorted(df.grupo_atividade.unique())[1:]],
+               tipos=[str(t) for t in sorted(df.tipo_loc.unique())[1:]])
+    Xk, yk = _X_area(df[known], ref), np.log(df.loc[known, "area_cadastrada_m2"].values)
+    beta, *_ = np.linalg.lstsq(Xk, yk, rcond=None)
+    res = yk - Xk @ beta
+    sd = float(res.std(ddof=Xk.shape[1])) if known.sum() > Xk.shape[1] + 5 else 0.6
+    r2 = 1 - res.var() / yk.var()
+    ref.update(beta=beta.tolist(), sd=sd, r2_log=round(float(r2), 3), n_known=int(known.sum()))
+    return ref
+
+
+def estimar_area(df, ref):
+    """Aplica o modelo de área salvo: laudo ±10% quando existe; senão predição ± 1 desvio (escala log)."""
+    known = df.area_cadastrada_m2 > 0
+    pred = np.exp(_X_area(df, ref) @ np.array(ref["beta"]))
+    sd = ref["sd"]
+    amed = np.where(known, df.area_cadastrada_m2, pred)
+    amin = np.where(known, df.area_cadastrada_m2 * 0.9, pred * np.exp(-sd))
+    amax = np.where(known, df.area_cadastrada_m2 * 1.1, pred * np.exp(sd))
+    clip = lambda a: np.clip(a, 15, 1500)
+    return clip(amed), clip(amin), clip(amax)
+
+
+def _ibge(v):
+    """Chave estável do município (int ou float vindo do CSV)."""
+    return str(int(v)) if pd.notna(v) else ""
+
+
+def ajustar_referencias(d):
+    """Tudo que depende da base inteira: modelo de área e aluguel de referência por m² (município x tipo de local)."""
+    area = ajustar_area(d)
+    amed, _, _ = estimar_area(d, area)
+    loc = d.valor_aluguel_recorrente > 0
+    rpm = pd.DataFrame(dict(ibge=d.codigo_ibge_municipio[loc].map(_ibge), tipo=d.tipo_loc[loc],
+                            rpm=d.valor_aluguel_recorrente[loc] / amed[loc.values]))
+    rpm_mt = rpm.groupby(["ibge", "tipo"]).rpm.median()
+    return dict(area=area,
+                rpm_mt={f"{i}|{t}": float(v) for (i, t), v in rpm_mt.items()},
+                rpm_t={str(t): float(v) for t, v in rpm.groupby("tipo").rpm.median().items()},
+                rpm_all=float(rpm.rpm.median()))
+
+
+def carregar_referencias(tag):
+    return json.load(open(f"{OUT}/{tag}/referencias.json"))
+
+
+# ============================ preparação do caso ============================
+BENS_COLS = ["bens_min", "bens_max", "elet_min", "elet_max", "port_min", "port_max", "let_min", "let_max",
+             "n_bens", "tem_eletr_semroubo", "val_baixa", "val_tot", "n_baixa"]
+
+
+def _agregar_bens(g):
+    return pd.Series(dict(
+        bens_min=g.loc[g.ok, "valor_bem_ponderado_referencia"].sum(),
+        bens_max=g.loc[g.probabilidade_bem_no_imovel_referencia >= 0.48, "valor_cadastrado"].sum(),
+        elet_min=g.loc[g.elet & g.ok, "valor_bem_ponderado_referencia"].sum(),
+        elet_max=g.loc[g.elet & (g.probabilidade_bem_no_imovel_referencia >= 0.48), "valor_cadastrado"].sum(),
+        port_min=g.loc[g.port & g.ok, "valor_bem_ponderado_referencia"].sum(),
+        port_max=g.loc[g.port & (g.probabilidade_bem_no_imovel_referencia >= 0.48), "valor_cadastrado"].sum(),
+        let_min=g.loc[g.tipo_bem == "LETREIRO", "valor_bem_ponderado_referencia"].sum(),
+        let_max=g.loc[g.tipo_bem == "LETREIRO", "valor_cadastrado"].sum(),
+        n_bens=len(g), tem_eletr_semroubo=int(g.elet.any()),
+        val_baixa=g.loc[g.nivel_confianca_vinculo == "BAIXA", "valor_cadastrado"].sum(),
+        val_tot=g.valor_cadastrado.sum(), n_baixa=int((g.nivel_confianca_vinculo == "BAIXA").sum())))
+
+
+def preparar(d, bens, refs=None):
+    """Sinais derivados por estabelecimento. d deve conter todas as unidades de cada empresa (rateio).
+    Sem refs (modo lote), as referências são ajustadas sobre o próprio d."""
+    d = d.copy()
     d["tipo_loc"] = d.apply(tipo_local, axis=1)
     # --- alocação empresa -> estabelecimento (folha como chave de rateio)
     tot_folha = d.groupby("empresa_id").folha_pagamento_mensal.transform("sum").replace(0, np.nan)
@@ -101,41 +157,46 @@ def processar(tag):
     d["fat_un"] = d.faturamento_mensal * share
     d["func_un"] = np.maximum(1, np.round(d.quantidade_funcionarios_estimada * share)).astype(int)
     d["multi"] = d.groupby("empresa_id").imovel_id.transform("count") > 1
-    d["amed"], d["amin"], d["amax"], area_info = impute_area(d)
+    if refs is None: refs = ajustar_referencias(d)
+    d["amed"], d["amin"], d["amax"] = estimar_area(d, refs["area"])
     d["area_imputada"] = d.area_cadastrada_m2 <= 0
-    # --- aluguel de referência por m² (município x tipo), p/ proprietários
-    loc = d[(d.valor_aluguel_recorrente > 0)].copy()
-    loc["rpm"] = loc.valor_aluguel_recorrente / loc.amed
-    rpm_mt = loc.groupby(["codigo_ibge_municipio", "tipo_loc"]).rpm.median()
-    rpm_t = loc.groupby("tipo_loc").rpm.median()
-    rpm_all = loc.rpm.median()
     # --- bens por imóvel
-    b = bens.copy()
+    b = bens[bens.imovel_id_referencia.isin(d.imovel_id)].copy()
     b["elet"] = b.tipo_bem.isin(ELETRICOS); b["port"] = b.tipo_bem.isin(PORTATEIS)
     b["ok"] = b.nivel_confianca_vinculo.isin(["ALTA", "MEDIA"])
-    def agg(g):
-        return pd.Series(dict(
-            bens_min=g.loc[g.ok, "valor_bem_ponderado_referencia"].sum(),
-            bens_max=g.loc[g.probabilidade_bem_no_imovel_referencia >= 0.48, "valor_cadastrado"].sum(),
-            elet_min=g.loc[g.elet & g.ok, "valor_bem_ponderado_referencia"].sum(),
-            elet_max=g.loc[g.elet & (g.probabilidade_bem_no_imovel_referencia >= 0.48), "valor_cadastrado"].sum(),
-            port_min=g.loc[g.port & g.ok, "valor_bem_ponderado_referencia"].sum(),
-            port_max=g.loc[g.port & (g.probabilidade_bem_no_imovel_referencia >= 0.48), "valor_cadastrado"].sum(),
-            let_min=g.loc[g.tipo_bem == "LETREIRO", "valor_bem_ponderado_referencia"].sum(),
-            let_max=g.loc[g.tipo_bem == "LETREIRO", "valor_cadastrado"].sum(),
-            n_bens=len(g), tem_eletr_semroubo=int(g.elet.any()),
-            val_baixa=g.loc[g.nivel_confianca_vinculo == "BAIXA", "valor_cadastrado"].sum(),
-            val_tot=g.valor_cadastrado.sum(), n_baixa=int((g.nivel_confianca_vinculo == "BAIXA").sum())))
-    ba = b.groupby("imovel_id_referencia").apply(agg, include_groups=False)
+    ba = (b.groupby("imovel_id_referencia").apply(_agregar_bens, include_groups=False) if len(b)
+          else pd.DataFrame(columns=BENS_COLS, dtype=float))
     d = d.merge(ba, left_on="imovel_id", right_index=True, how="left")
     for c in ba.columns: d[c] = d[c].fillna(0)
     d["share_baixa"] = np.where(d.val_tot > 0, d.val_baixa / d.val_tot.replace(0, np.nan), 0)
     d["share_baixa"] = d.share_baixa.fillna(0)
+    return d, refs
 
+
+# ============================ motor (1 caso) ============================
+def recomendar(x, refs):
+    """Motor: um estabelecimento preparado -> recomendação. Não lê nem escreve arquivos."""
+    R, C = decidir(x, refs)
+    return dict(resultado=R, coberturas=C)
+
+
+def recomendar_imovel(imovel_id, d, bens, refs):
+    """Atalho para jornadas: recomenda um estabelecimento usando só as unidades da própria empresa + refs salvas."""
+    emp = d.loc[d.imovel_id == imovel_id, "empresa_id"].iloc[0]
+    caso, _ = preparar(d[d.empresa_id == emp], bens, refs)
+    return recomendar(next(caso[caso.imovel_id == imovel_id].itertuples(index=False)), refs)
+
+
+# ============================ lote (todos os casos -> templates) ============================
+def processar(tag):
+    t0 = time.time()
+    cfg = DATASETS[tag]
+    d, bens, tpl, ter = carregar(cfg)
+    d, refs = preparar(d, bens)
     res, cob = [], []
     for row in d.itertuples(index=False):
-        R, C = decidir(row, rpm_mt, rpm_t, rpm_all)
-        res.append(R); cob.extend(C)
+        rec = recomendar(row, refs)
+        res.append(rec["resultado"]); cob.extend(rec["coberturas"])
     res = pd.DataFrame(res); cob = pd.DataFrame(cob)
     # alinhar com o template (mesma ordem/colunas)
     out = tpl[["empresa_id", "imovel_id"]].merge(res, on=["empresa_id", "imovel_id"], how="left")
@@ -146,13 +207,15 @@ def processar(tag):
     os.makedirs(f"{OUT}/{tag}", exist_ok=True)
     out.to_csv(f"{OUT}/{tag}/template_resultado_times.csv", index=False, encoding="utf-8")
     cob.to_csv(f"{OUT}/{tag}/template_coberturas_times.csv", index=False, encoding="utf-8")
+    json.dump(refs, open(f"{OUT}/{tag}/referencias.json", "w"), indent=2, ensure_ascii=False)
+    area_info = dict(r2_log=refs["area"]["r2_log"], sd_log=round(refs["area"]["sd"], 3), n_known=refs["area"]["n_known"])
     met = metricas(tag, d, out, cob, area_info, time.time() - t0, tpl)
     json.dump(met, open(f"{OUT}/{tag}/metricas.json", "w"), indent=2, ensure_ascii=False)
     return d, out, cob, met
 
 
 # ----------------------------------------------------------------------------------------------
-def decidir(x, rpm_mt, rpm_t, rpm_all):
+def decidir(x, refs):
     ident = dict(empresa_id=x.empresa_id, imovel_id=x.imovel_id)
     loc = x.tipo_loc
     locatario = x.pagamento_aluguel_recorrente == "SIM"
@@ -269,9 +332,9 @@ def decidir(x, rpm_mt, rpm_t, rpm_all):
         add("PERDA_PAGAMENTO_ALUGUEL", a_min, a_max, "ALTA", "valor_aluguel_recorrente", "min = 3 × aluguel mensal; max = 12 × aluguel mensal",
             f"Aluguel recorrente observado de R$ {x.valor_aluguel_recorrente:.0f}/mês; período indenitário de 3 a 12 meses.", "Valor do aluguel vigente e prazo contratual")
     else:
-        rpm = rpm_mt.get((x.codigo_ibge_municipio, loc), np.nan)
+        rpm = refs["rpm_mt"].get(f"{_ibge(x.codigo_ibge_municipio)}|{loc}", np.nan)
         origem = "mediana R$/m² de locatários no mesmo município e tipo de local"
-        if np.isnan(rpm): rpm, origem = rpm_t.get(loc, rpm_all), "mediana R$/m² de locatários do mesmo tipo de local (sem amostra municipal)"
+        if np.isnan(rpm): rpm, origem = refs["rpm_t"].get(loc, refs["rpm_all"]), "mediana R$/m² de locatários do mesmo tipo de local (sem amostra municipal)"
         add("PERDA_PAGAMENTO_ALUGUEL", 3 * x.amin * rpm, 12 * x.amax * rpm, "BAIXA", f"{origem}; {area_txt}; sem aluguel recorrente observado",
             "min = 3 × (área mín × R$/m² ref.); max = 12 × (área máx × R$/m² ref.)",
             "Sem aluguel observado: relação sugerida PROPRIETÁRIO; faixa representa aluguel de reposição/perda de aluguel de referência.",
