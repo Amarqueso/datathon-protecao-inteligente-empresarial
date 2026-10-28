@@ -9,6 +9,7 @@ Abordagem: regras explícitas + estimativas por faixa (sem ML). 100 % determiní
 Python 3.x ; dependências: pandas, numpy.
 """
 import json, os, sys, time
+from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
@@ -38,7 +39,7 @@ ASSISTENCIAS = {  # guia 10.2: acompanham o plano, não são customizáveis
     "TOTAL": ["Empresa em Apuros", "Proteção Digital", "Empresa Funcionando", "Empresa Arrumada", "Empresa Limpa",
               "Empresa Segura", "Empresa sem Pragas", "Benefício Premium"],
 }
-VERSAO_CONTRATO = "1.0"
+VERSAO_CONTRATO = "1.1"
 TETO_BASICA = 7_500_000  # cobertura básica; acima -> Seguro Personalizado Empresarial
 
 ELETRICOS = {"EQUIPAMENTO_ELETRONICO", "EQUIPAMENTO_INFORMATICA", "EQUIPAMENTO_MEDICO", "EQUIPAMENTO_REFRIGERACAO",
@@ -181,6 +182,110 @@ def preparar(d, bens, refs=None):
     return d, refs
 
 
+# ============================ confirmação (respostas do cliente/gerente) ============================
+# Cada resposta altera o sinal correspondente ANTES de decidir(): plano, faixas, confiança e perguntas se recalculam.
+# id da pergunta -> (tipo, sinais que passam a CONFIRMADO)
+RESPOSTAS_ACEITAS = {
+    "elegibilidade_local": ("booleano", ["condicoes_aceitacao_local"]),
+    "impedimento_resolvido": ("booleano", ["impedimento_resolvido"]),
+    "relacao_imovel": ("opcao", ["relacao_imovel", "aluguel_mensal"]),
+    "area_m2": ("numero", ["area_m2"]),
+    "endereco_cnpj": ("booleano", ["endereco_cnpj_compativel"]),
+    "bens_baixa_confianca": ("booleano", ["bens_vinculados"]),
+    "faturamento_despesas": ("numero", ["faturamento_mensal_unidade", "despesa_fixa_mensal"]),
+    "refrigeracao": ("booleano", ["refrigeracao"]),
+    "delivery": ("booleano", ["delivery"]),
+    "valores_em_caixa": ("booleano", ["valores_em_caixa"]),
+    "valor_reposicao": ("numero", ["valor_reposicao"]),
+}
+PERGUNTA_META = {  # campos extras para as jornadas montarem o formulário
+    "relacao_imovel": dict(opcoes=["PROPRIETARIO", "LOCATARIO"], campos=["aluguel_mensal"]),
+    "faturamento_despesas": dict(campos=["faturamento_mensal", "despesa_fixa_mensal"]),
+}
+
+
+def _bool(k, v):
+    if isinstance(v, bool): return v
+    s = str(v).strip().upper()
+    if s in ("SIM", "S", "TRUE", "1"): return True
+    if s in ("NAO", "NÃO", "N", "FALSE", "0"): return False
+    raise ValueError(f"Resposta inválida para '{k}': use SIM ou NAO")
+
+
+def _num(k, v, positivo=True):
+    try: f = float(v)
+    except (TypeError, ValueError): raise ValueError(f"Resposta inválida para '{k}': informe um número")
+    if not np.isfinite(f) or f < 0 or (positivo and f == 0): raise ValueError(f"Resposta inválida para '{k}': valor fora do intervalo")
+    return f
+
+
+def aplicar_respostas(x, respostas):
+    """Devolve (caso ajustado, respostas normalizadas, ids ignorados). Não altera o caso original."""
+    y = SimpleNamespace(**(x._asdict() if hasattr(x, "_asdict") else vars(x)))
+    ok, ignoradas = {}, []
+    for k, v in (respostas or {}).items():
+        if k not in RESPOSTAS_ACEITAS or v is None or v == "":
+            ignoradas.append(k); continue
+        if k == "elegibilidade_local":
+            ok[k] = y.elegibilidade_local = _bool(k, v)
+        elif k == "impedimento_resolvido":
+            ok[k] = _bool(k, v)
+            if ok[k]: y.situacao_imovel_cadastral = "REGULAR"
+        elif k == "relacao_imovel":
+            rel, aluguel = (v.get("relacao"), v.get("aluguel_mensal")) if isinstance(v, dict) else (v, None)
+            rel = {"PROPRIO": "PROPRIETARIO", "ALUGADO": "LOCATARIO"}.get(str(rel).upper(), str(rel).upper())
+            if rel not in ("PROPRIETARIO", "LOCATARIO"): raise ValueError("Resposta inválida para 'relacao_imovel': use PROPRIETARIO ou LOCATARIO")
+            if rel == "LOCATARIO":
+                aluguel = _num("aluguel_mensal", aluguel) if aluguel not in (None, "") else float(y.valor_aluguel_recorrente)
+                if aluguel <= 0: raise ValueError("Informe o aluguel mensal para o estabelecimento alugado")
+                y.pagamento_aluguel_recorrente, y.valor_aluguel_recorrente = "SIM", aluguel
+                ok[k] = dict(relacao=rel, aluguel_mensal=aluguel)
+            else:
+                y.pagamento_aluguel_recorrente, y.valor_aluguel_recorrente = "NAO", 0.0
+                ok[k] = dict(relacao=rel)
+        elif k == "area_m2":
+            a = ok[k] = _num(k, v)
+            y.area_cadastrada_m2, y.amed, y.amin, y.amax, y.area_imputada = a, a, 0.9 * a, 1.1 * a, False
+            y.area_confirmada = True
+        elif k == "endereco_cnpj":
+            ok[k] = _bool(k, v); y.endereco_cnpj_compativel = "SIM" if ok[k] else "NAO"
+        elif k == "bens_baixa_confianca":
+            ok[k] = _bool(k, v)  # os bens são reagregados em recomendar_imovel (dependem da base de bens)
+        elif k == "faturamento_despesas":
+            if not isinstance(v, dict): raise ValueError("Resposta inválida para 'faturamento_despesas': informe faturamento_mensal e/ou despesa_fixa_mensal")
+            ok[k] = {}
+            if v.get("faturamento_mensal") not in (None, ""):
+                y.fat_un = ok[k]["faturamento_mensal"] = _num("faturamento_mensal", v["faturamento_mensal"])
+                if not y.multi: y.faturamento_mensal = y.fat_un
+                y.confianca_faturamento = "ALTA"
+            if v.get("despesa_fixa_mensal") not in (None, ""):
+                y.despesa_fixa_mensal_estimada = ok[k]["despesa_fixa_mensal"] = _num("despesa_fixa_mensal", v["despesa_fixa_mensal"])
+            if not ok[k]: del ok[k]; ignoradas.append(k); continue
+            y.financeiro_confirmado = True
+        elif k == "refrigeracao":
+            ok[k] = _bool(k, v); y.probabilidade_refrigeracao_referencia = 1.0 if ok[k] else 0.0
+        elif k == "delivery":
+            ok[k] = _bool(k, v); y.probabilidade_delivery_referencia = 1.0 if ok[k] else 0.0
+            if not ok[k]: y.percentual_receita_delivery_est = 0.0
+        elif k == "valores_em_caixa":
+            ok[k] = y.valores_em_caixa = _bool(k, v)
+        elif k == "valor_reposicao":
+            ok[k] = y.valor_reposicao = _num(k, v)
+    y.respondidas = set(ok)
+    return y, ok, ignoradas
+
+
+def _aplicar_bens(bens, imovel_id, incluir):
+    """Bens de vínculo BAIXO confirmados no endereço passam a contar integralmente; negados saem do cálculo."""
+    m = (bens.imovel_id_referencia == imovel_id) & (bens.nivel_confianca_vinculo == "BAIXA")
+    if not incluir: return bens[~m]
+    bens = bens.copy()
+    bens.loc[m, "nivel_confianca_vinculo"] = "ALTA"
+    bens.loc[m, "probabilidade_bem_no_imovel_referencia"] = 1.0
+    bens.loc[m, "valor_bem_ponderado_referencia"] = bens.loc[m, "valor_cadastrado"]
+    return bens
+
+
 # ============================ motor (1 caso) ============================
 # Origem de cada sinal (guia, seção 3): OBSERVADO = cadastral/disponível; DERIVADO = fórmula documentada;
 # ESTIMADO = sugestão a partir de sinais e premissas; CONFIRMADO = informado pelo cliente/gerente.
@@ -239,10 +344,22 @@ def _alternativa(plano, alt, C, C_alt):
                 assistencias=ASSISTENCIAS[alt], tradeoff=f"{alt}: {sentido}; " + "; ".join(partes) + ".")
 
 
-def recomendar(x, refs):
+def recomendar(x, refs, respostas=None):
     """Motor: um estabelecimento preparado -> recomendação (JSON). Não lê nem escreve arquivos.
-    O mesmo contrato atende lote, atendimento assistido e agente; 'template' traz as linhas no formato dos CSVs."""
+    O mesmo contrato atende lote, atendimento assistido e agente; 'template' traz as linhas no formato dos CSVs.
+    respostas: {id_da_pergunta: valor} (ver RESPOSTAS_ACEITAS); recalcula tudo e marca os sinais como CONFIRMADO."""
+    confirmadas, ignoradas = {}, []
+    if respostas:
+        x, confirmadas, ignoradas = aplicar_respostas(x, respostas)
     R, C, S = decidir(x, refs)
+    sin = {k: v for k, v in S.get("sinais", {}).items() if v is not None}
+    for pid in confirmadas:
+        chaves = RESPOSTAS_ACEITAS[pid][1]
+        if pid == "faturamento_despesas":  # só o que foi efetivamente informado
+            chaves = [k for k, c in zip(chaves, ["faturamento_mensal", "despesa_fixa_mensal"]) if c in confirmadas[pid]]
+        for k in chaves:  # sinal sem equivalente na base (ex.: condições do local) entra já confirmado
+            if k in sin: sin[k] = dict(sin[k], origem="CONFIRMADO", fonte="resposta do cliente/gerente")
+            elif k not in S.get("sinais", {}): sin[k] = _sinal(confirmadas[pid], "CONFIRMADO", "resposta do cliente/gerente")
     elegivel = R["elegivel"] == "SIM"
     out = dict(
         versao_contrato=VERSAO_CONTRATO,
@@ -256,19 +373,23 @@ def recomendar(x, refs):
         coberturas=[_cob(c) for c in C],
         alternativa=_alternativa(S["plano"], S["alt_plano"], C, S["coberturas_alt"]) if elegivel else None,
         confianca_geral=R["confianca_geral"],
-        sinais={k: v for k, v in S.get("sinais", {}).items() if v is not None},
+        sinais=sin,
         perguntas=S["perguntas"],
+        respostas_aplicadas=confirmadas,
+        respostas_ignoradas=ignoradas,
         justificativa=R["justificativa_recomendacao"],
         template=dict(resultado=R, coberturas=C),
     )
     return out
 
 
-def recomendar_imovel(imovel_id, d, bens, refs):
+def recomendar_imovel(imovel_id, d, bens, refs, respostas=None):
     """Atalho para jornadas: recomenda um estabelecimento usando só as unidades da própria empresa + refs salvas."""
     emp = d.loc[d.imovel_id == imovel_id, "empresa_id"].iloc[0]
+    if respostas and respostas.get("bens_baixa_confianca") not in (None, ""):
+        bens = _aplicar_bens(bens, imovel_id, _bool("bens_baixa_confianca", respostas["bens_baixa_confianca"]))
     caso, _ = preparar(d[d.empresa_id == emp], bens, refs)
-    return recomendar(next(caso[caso.imovel_id == imovel_id].itertuples(index=False)), refs)
+    return recomendar(next(caso[caso.imovel_id == imovel_id].itertuples(index=False)), refs, respostas)
 
 
 # ============================ lote (todos os casos -> templates) ============================
@@ -311,6 +432,9 @@ def decidir(x, refs):
     if any(k in str(x.material_parede_externa_cadastrado).upper() for k in COMBUSTIVEL): motivos.append("Parede externa em material combustível")
     rural = any(k in str(x.descricao_cnae).lower() for k in ("agricult", "pecuari", "rural", "lavoura"))
     if rural: motivos.append("Atividade rural")
+    if getattr(x, "elegibilidade_local", None) is False:
+        motivos.append("Condições de aceitação do local não confirmadas (parede combustível, comunidade/favela/área rural, imóvel tombado/condenado ou outra proposta BB Seguros)")
+    respondidas = getattr(x, "respondidas", set())
     base = dict(**ident, tipo_localizacao_sugerido=loc, relacao_imovel_sugerida=relacao)
     q_fixa = ("Confirme: (i) parede externa em material incombustível, (ii) imóvel fora de comunidade/favela/área rural "
               "e não tombado/condenado, (iii) sem outra proposta de seguro empresarial BB Seguros para o mesmo objeto.")
@@ -321,7 +445,10 @@ def decidir(x, refs):
                  "[SUGESTAO] Reavaliar quando o impedimento cessar.",
                  perguntas_confirmacao="A obra/reforma foi concluída e há habite-se/regularização do imóvel? Se sim, reenviar para nova análise.",
                  fontes_publicas_adicionais="NAO_UTILIZADA")
-        return R, [], dict(motivos=motivos, perguntas=[dict(id="impedimento_resolvido", tipo="booleano", texto=R["perguntas_confirmacao"])])
+        Qi = [] if "impedimento_resolvido" in respondidas or not any(m.startswith(("Imóvel em construção", "Situação cadastral")) for m in motivos) \
+            else [dict(id="impedimento_resolvido", tipo="booleano", texto=R["perguntas_confirmacao"])]
+        if not Qi and respondidas: R["perguntas_confirmacao"] = ""
+        return R, [], dict(motivos=motivos, perguntas=Qi)
 
     # ---------------- sinais derivados ----------------
     fat, n = x.fat_un, x.func_un
@@ -333,6 +460,7 @@ def decidir(x, refs):
     incons_comp = decl < recomp * 0.95
     if x.multi:
         tot = x.faturamento_mensal; incons_fin = False  # consolidado por empresa não é comparável por unidade
+    if getattr(x, "financeiro_confirmado", False): incons_fin = incons_comp = False  # valores confirmados prevalecem
     # prédio (somente proprietário)
     padr = x.padrao_construtivo_cadastrado
     cmin, cmax = M2_CONSTR.get(padr, (2500, 5000))
@@ -347,6 +475,8 @@ def decidir(x, refs):
         inc_min, inc_max = cont_min, cont_max
         objeto = "conteúdo (prédio é do locador)"
     inc_min, inc_max = max(inc_min, 20000), max(inc_max, inc_min * 1.3, 40000)
+    if getattr(x, "valor_reposicao", None):  # valor de reposição confirmado substitui a estimativa (±10%)
+        inc_min, inc_max = 0.9 * x.valor_reposicao, 1.1 * x.valor_reposicao
     acima_teto = inc_max > TETO_BASICA
     if inc_min > TETO_BASICA:  # fora do produto: direcionar ao Seguro Personalizado Empresarial
         mot = "Estimativa mínima de incêndio acima de R$ 7,5 mi: direcionar ao Seguro Personalizado Empresarial"
@@ -355,7 +485,7 @@ def decidir(x, refs):
                     justificativa_recomendacao="[SUGESTAO] " + mot + ".", perguntas_confirmacao="Confirme o valor de reposição de prédio e conteúdo.",
                     fontes_publicas_adicionais="NAO_UTILIZADA"), [], dict(
                     motivos=[mot], direcionamento="SEGURO_PERSONALIZADO_EMPRESARIAL",
-                    perguntas=[dict(id="valor_reposicao", tipo="numero", texto="Confirme o valor de reposição de prédio e conteúdo.")])
+                    perguntas=[] if "valor_reposicao" in respondidas else [dict(id="valor_reposicao", tipo="numero", texto="Confirme o valor de reposição de prédio e conteúdo.")])
     if acima_teto: inc_max = TETO_BASICA
     # ---------------- plano ----------------
     vend_rel = loc in ("LOJA_RUA", "TERREO", "GALPAO")
@@ -364,7 +494,8 @@ def decidir(x, refs):
     emp_rel = n >= 5
     refrig = x.probabilidade_refrigeracao_referencia >= 0.5
     deliv = (x.probabilidade_delivery_referencia >= 0.4) or (x.percentual_receita_delivery_est >= 0.15)
-    cash_heavy = x.percentual_recebimentos_digitais <= 0.5 and x.grupo_atividade in ("MERCADO", "FARMACIA", "RESTAURANTE", "BELEZA", "VAREJO_MODA", "OFICINA", "ELETRONICOS")
+    cash_heavy = getattr(x, "valores_em_caixa", None)
+    if cash_heavy is None: cash_heavy = x.percentual_recebimentos_digitais <= 0.5 and x.grupo_atividade in ("MERCADO", "FARMACIA", "RESTAURANTE", "BELEZA", "VAREJO_MODA", "OFICINA", "ELETRONICOS")
     espec = refrig or deliv or cash_heavy
     if vidro_rel and emp_rel and (theft_rel or vend_rel):
         plano = "TOTAL"
@@ -398,7 +529,7 @@ def decidir(x, refs):
     ordem = {"ALTA": 3, "MEDIA": 2, "BAIXA": 1}; inv = {3: "ALTA", 2: "MEDIA", 1: "BAIXA"}
     minc = lambda *a: inv[min(ordem[i] for i in a)]
     c_fat = x.confianca_faturamento
-    area_txt = (f"área {x.area_cadastrada_m2:.0f} m² (laudo)" if not x.area_imputada
+    area_txt = (f"área {x.area_cadastrada_m2:.0f} m² ({'confirmada' if getattr(x, 'area_confirmada', False) else 'laudo'})" if not x.area_imputada
                 else f"área imputada {x.amed:.0f} m² (faixa {x.amin:.0f}-{x.amax:.0f}; regressão sobre energia, folha, atividade e tipo de local)")
 
     # --- fixas
@@ -510,7 +641,7 @@ def decidir(x, refs):
     pts += 0 if c_fat == "ALTA" else 1
     pts += 1 if not cnpj_ok else 0
     pts += 1 if (incons_fin or incons_comp) else 0
-    pts += 1 if not locatario else 0
+    pts += 1 if not locatario and "relacao_imovel" not in respondidas else 0
     pts += 1 if x.situacao_imovel_cadastral != "REGULAR" else 0
     conf = "ALTA" if pts <= 2 else ("MEDIA" if pts <= 4 else "BAIXA")
 
@@ -524,20 +655,21 @@ def decidir(x, refs):
     if 0.3 <= x.probabilidade_refrigeracao_referencia < 0.7 and plano != "ESSENCIAL": Q.append((7, "Há equipamentos de refrigeração com mercadorias perecíveis?", "refrigeracao", "booleano"))
     if 0.2 <= x.probabilidade_delivery_referencia < 0.5: Q.append((8, "A empresa realiza entregas (delivery)?", "delivery", "booleano"))
     if acima_teto: Q.append((0, 'Valor de reposição de prédio e conteúdo pode superar R$ 7,5 mi: confirmar para eventual direcionamento ao Seguro Personalizado Empresarial.', "valor_reposicao", "numero"))
-    Qs = sorted(Q, key=lambda q: q[0])[:4]
+    Qs = sorted((q for q in Q if q[2] not in respondidas), key=lambda q: q[0])[:4]
     Q = [q[1] for q in Qs]
 
     ev = [f"[DISPONÍVEL] {x.grupo_atividade}, local {loc}, {n} empregados na unidade, {'aluguel R$ %.0f/mês' % x.valor_aluguel_recorrente if locatario else 'sem aluguel recorrente'}, "
           f"estoque médio/pico R$ {est_med:.0f}/{est_pico:.0f}, {x.n_bens:.0f} bens vinculados"]
     ev.append(f"[SUGESTÃO] plano {plano}: " + "; ".join(motivos_plano) + f". Relação sugerida: {relacao}. " +
-              (f"Área estimada ~{x.amed:.0f} m²." if x.area_imputada else f"Área de laudo {x.area_cadastrada_m2:.0f} m²."))
+              (f"Área estimada ~{x.amed:.0f} m²." if x.area_imputada else f"Área {'confirmada' if getattr(x, 'area_confirmada', False) else 'de laudo'} {x.area_cadastrada_m2:.0f} m²."))
+    if respondidas: ev.append("[CONFIRMADO] " + ", ".join(sorted(respondidas)) + " (informado pelo cliente/gerente).")
     ev.append(f"[CONFIRMAR] {len(Q)} pergunta(s) priorizada(s). Alternativa: {alt}.")
     R = dict(base, elegivel="SIM", motivo_inelegibilidade="", plano_recomendado=plano,
              coberturas_recomendadas="|".join(PLANO_COB[plano] + adic), confianca_geral=conf,
              justificativa_recomendacao=" ".join(ev), perguntas_confirmacao=" | ".join(Q),
              fontes_publicas_adicionais="NAO_UTILIZADA (sugeridas: IBGE malha municipal, INMET, Defesa Civil, SSP; ver README)")
     S = dict(motivos=[], plano=plano, motivos_plano=motivos_plano, alt_plano=alt_plano, coberturas_alt=C_alt,
-             perguntas=[dict(id=i, tipo=t, texto=q) for _, q, i, t in Qs],
+             perguntas=[dict(id=i, tipo=t, texto=q, **PERGUNTA_META.get(i, {})) for _, q, i, t in Qs],
              sinais=sinais(x, locatario, relacao, loc, n, fat, refrig, deliv, cash_heavy))
     return R, C, S
 

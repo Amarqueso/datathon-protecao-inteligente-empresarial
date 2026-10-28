@@ -34,5 +34,15 @@
         "var_mediana_incendio_max_pct": -1.4
       }
     }
+  },
+  "confirmacao_CASO": {
+    "casos_elegiveis": 137,
+    "casos_com_area_confirmada": 83,
+    "falhas": {
+      "area_confirmada": 0,
+      "local_negado_inelegivel": 0,
+      "faixas_validas": 0,
+      "deterministico": 0
+    }
   }
 }

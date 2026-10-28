@@ -38,5 +38,26 @@ for tag in E.DATASETS:
     t["sensibilidade"] = sens
     E.processar(tag)  # restaura saída original
     rel[tag] = t
+
+# confirmação (passo 3): cada resposta recalcula o caso, vira CONFIRMADO e tira a pergunta da lista
+d, b, _, _ = E.carregar(E.DATASETS["CASO"]); refs = E.carregar_referencias("CASO")
+falhas = {"area_confirmada": 0, "local_negado_inelegivel": 0, "faixas_validas": 0, "deterministico": 0}
+n_area = n_el = 0
+for i in d.imovel_id:
+    j = E.recomendar_imovel(i, d, b, refs)
+    if not j["elegivel"]: continue
+    n_el += 1
+    ids = [p["id"] for p in j["perguntas"]]
+    resp = {"elegibilidade_local": True, "delivery": True}
+    if "area_m2" in ids:
+        n_area += 1; resp["area_m2"] = 150
+    z = E.recomendar_imovel(i, d, b, refs, resp)
+    if "area_m2" in resp and (z["sinais"]["area_m2"]["origem"] != "CONFIRMADO" or "area_m2" in [p["id"] for p in z["perguntas"]]):
+        falhas["area_confirmada"] += 1
+    falhas["faixas_validas"] += any(c["min"] > c["max"] for c in z["coberturas"])
+    falhas["deterministico"] += json.dumps(z, sort_keys=True, default=str) != json.dumps(E.recomendar_imovel(i, d, b, refs, resp), sort_keys=True, default=str)
+    n = E.recomendar_imovel(i, d, b, refs, {"elegibilidade_local": "NAO"})
+    falhas["local_negado_inelegivel"] += n["elegivel"] or bool(n["coberturas"])
+rel["confirmacao_CASO"] = dict(casos_elegiveis=n_el, casos_com_area_confirmada=n_area, falhas=falhas)
 json.dump(rel, open(f"{E.OUT}/testes_coerencia.json", "w"), indent=2, ensure_ascii=False)
 print(json.dumps(rel, indent=1, ensure_ascii=True))
