@@ -1,0 +1,38 @@
+# ---------- Ambiente virtual ----------
+venv/
+.venv/
+env/
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ---------- Editor / sistema ----------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---------- Segredos (nunca versionar) ----------
+.env
+*.key
+*.pem
+
+# ---------- Dados de entrada da organização ----------
+# Ignorados por padrão: a redistribuição pode não ser permitida.
+# Para versionar, apague estas duas linhas.
+teste_comum/
+desenvolvimento/
+
+# ---------- Arquivos gerados pesados ----------
+# O front da base de desenvolvimento passa de 17 MB.
+frontend_EMP.html
+
+# ---------- Mantidos no repositório (entrega) ----------
+# saida/ (templates preenchidos e métricas)
+# frontend_CASO.html
+# engine.py, testes_coerencia.py, gerar_frontend.py
+# README.md, requirements.txt

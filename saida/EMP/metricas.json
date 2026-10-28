@@ -1,0 +1,38 @@
+{
+  "conjunto": "EMP",
+  "casos_template": 2978,
+  "casos_processados": 2978,
+  "pct_processados": 100.0,
+  "elegiveis": 2848,
+  "inelegiveis": 130,
+  "inelegiveis_por_motivo": {
+    "Imóvel em construção/reforma/reconstrução (situacao_imovel_cadastral=EM_OBRA)": 78,
+    "Situação cadastral IRREGULAR do imóvel (possível imóvel condenado/desapropriado/tombado)": 52
+  },
+  "distribuicao_planos": {
+    "PRATICO": 2125,
+    "TOTAL": 516,
+    "ESSENCIAL": 207
+  },
+  "confianca_geral": {
+    "MEDIA": 1292,
+    "ALTA": 1025,
+    "BAIXA": 531
+  },
+  "pct_confianca_baixa": 18.64,
+  "media_perguntas": 3.12,
+  "pct_com_justificativa": 100.0,
+  "linhas_coberturas": 26947,
+  "faixas_validas": 26947,
+  "pct_faixas_validas": 100.0,
+  "pct_planos_com_todas_coberturas_fixas": 100.0,
+  "coberturas_adicionais_linhas": 3545,
+  "area_imputada_pct": 61.7,
+  "modelo_area": {
+    "r2_log": 0.837,
+    "sd_log": 0.286,
+    "n_known": 1140
+  },
+  "casos_multiunidade": 956,
+  "tempo_execucao_s": 11.63
+}
