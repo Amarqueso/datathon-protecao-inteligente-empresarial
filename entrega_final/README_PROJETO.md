@@ -7,7 +7,7 @@ Datathon Proteção Inteligente · BB Seguros · **Desafio: Seguro Empresarial**
 | Campo | Valor |
 | --- | --- |
 | Nome da equipe | Tropa do BB |
-| Integrantes | Arthur Marques, Eduardo Augusto |
+| Integrantes | Arthur Marques, Eduardo Augusto, Isabela Martins |
 | Instituição / turma | BB, BBTS |
 | Desafio | Seguro Empresarial |
 

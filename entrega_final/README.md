@@ -1,6 +1,6 @@
 # Pacote final — Proteção Inteligente
 
-Equipe **Tropa do BB** · Desafio **Seguro Empresarial**
+Equipe **Tropa do BB** · Integrantes: **Arthur Marques, Eduardo Augusto e Isabela Martins** · Desafio **Seguro Empresarial**
 
 Este diretório contém os materiais finais da solução. As bases de entrada fornecidas pela organização não são redistribuídas e devem ser disponibilizadas separadamente nas pastas `teste_comum/` e `desenvolvimento/` para uma nova execução.
 
