@@ -42,3 +42,6 @@ frontend_EMP.html
 # frontend_CASO.html
 # engine.py, testes_coerencia.py, gerar_frontend.py
 # README.md, requirements.txt
+# ---------- Base CASO para o deploy público (Render) ----------
+# Só a base comum de teste é publicada; a de desenvolvimento continua fora.
+!/dados_publicos/teste_comum/

@@ -94,7 +94,19 @@ python testes_coerencia.py          # testes de coerência, estabilidade e confi
 python gerar_frontend.py            # http://127.0.0.1:5000 (dashboard + atendimento assistido)
 ```
 
-O assistente com LLM é opcional: copie `.env.example` para `.env` e preencha `OPENAI_API_KEY`. O lote, os testes e o atendimento assistido funcionam sem chave.
+O assistente com LLM é opcional: copie `.env.example` para `.env` e preencha `OPENAI_API_KEY`. O padrão é o Gemini no plano gratuito (chave em [aistudio.google.com/apikey](https://aistudio.google.com/apikey)), chamado pela API compatível com a OpenAI. Para usar a OpenAI, apague `OPENAI_BASE_URL`. O lote, os testes e o atendimento assistido funcionam sem chave.
+
+### Demonstração online
+
+A tela também roda num servidor público (Render), sem instalar nada e sem chave: **[link da demonstração](#)**. No primeiro acesso, o servidor pode levar cerca de um minuto para acordar.
+
+O deploy publica só a base comum de teste (`dados_publicos/teste_comum/`); a base de desenvolvimento fica fora. Configuração do serviço no Render:
+
+| Campo | Valor |
+|---|---|
+| Build | `pip install -r requirements.txt` |
+| Start | `gunicorn gerar_frontend:app --bind 0.0.0.0:$PORT --timeout 120` |
+| Variáveis | `DADOS_DIR=dados_publicos`, `PYTHON_VERSION=3.14.6`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` (valores do `.env.example`) |
 
 ### Exemplos de uso do motor
 
@@ -246,12 +258,12 @@ Não há métricas de acurácia: o problema não tem rótulo supervisionado. Os 
 - Toda faixa traz dados, regra e o que confirmar; a origem de cada dado é explícita.
 - O gerente ou o cliente confirma as informações e pode desfazer respostas; a decisão final é humana.
 - O LLM só conversa; não decide plano nem valores. O conteúdo dos registros é tratado como dado, não como instrução.
-- A chave da API fica em `.env`, fora do repositório.
+- A chave da API fica em `.env`, fora do repositório; no servidor público, fica nas variáveis secretas do Render.
 
 ## Uso de inteligência artificial
 
 - **No desenvolvimento:** usamos assistentes de IA (Claude Code) como apoio para refatorar o motor, implementar o ciclo de confirmação, a tela do atendimento assistido, os testes e esta documentação. Todas as regras, premissas e resultados foram revisados pela equipe, que é capaz de explicar, executar e defender a solução.
-- **No produto:** o assistente de dados da tela usa a API da OpenAI (modelo configurável em `OPENAI_MODEL`) para responder perguntas sobre os resultados. Ele não participa da recomendação.
+- **No produto:** o assistente de dados da tela usa um LLM por API compatível com a OpenAI (Gemini por padrão; provedor e modelo configuráveis em `OPENAI_BASE_URL` e `OPENAI_MODEL`) para responder perguntas sobre os resultados. Ele não participa da recomendação.
 
 ## Próximos passos
 
