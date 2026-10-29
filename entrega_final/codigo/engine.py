@@ -1,0 +1,706 @@
+#!/usr/bin/env python3
+"""Motor de recomendação – Seguro Empresarial (Datathon Proteção Inteligente).
+
+Entrada : CSVs da base comum (empresas, enderecos, sinais, territorio, bens).
+Saída   : template_resultado_times.csv e template_coberturas_times.csv preenchidos
+          + metricas.json (evidências) por conjunto de dados.
+Execução: python engine.py            (usa /mnt/user-data/uploads -> ./saida/<CONJUNTO>)
+Abordagem: regras explícitas + estimativas por faixa (sem ML). 100 % determinística.
+Python 3.x ; dependências: pandas, numpy.
+"""
+import json, os, sys, time
+from types import SimpleNamespace
+import numpy as np
+import pandas as pd
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+UP = os.environ.get("DADOS_DIR", BASE)                      # pasta que contém teste_comum/ e desenvolvimento/
+OUT = os.environ.get("SAIDA_DIR", os.path.join(BASE, "saida"))
+
+_NOMES = dict(emp="empresas", end="enderecos_estabelecimentos", sin="sinais_financeiros_operacionais",
+              ter="territorio", bens="bens_cadastrados", tpl="template_resultado_times")
+DATASETS = {
+    "CASO": dict(pasta="teste_comum", **_NOMES),      # base comum de teste (144 estabelecimentos)
+    "EMP": dict(pasta="desenvolvimento", **_NOMES),   # base de desenvolvimento (2.978 estabelecimentos)
+}
+
+FIXAS = ["INCENDIO_RAIO_EXPLOSAO_FUMACA", "DANOS_ELETRICOS", "PERDA_PAGAMENTO_ALUGUEL",
+         "RESPONSABILIDADE_CIVIL_ESTABELECIMENTO", "DESPESAS_FIXAS", "PROTECAO_CIBERNETICA"]
+PLANO_COB = {
+    "ESSENCIAL": FIXAS,
+    "PRATICO": FIXAS + ["ROUBO_FURTO_ARROMBAMENTO", "VENDAVAL_EVENTOS_CORRELATOS"],
+    "TOTAL": FIXAS + ["ROUBO_FURTO_ARROMBAMENTO", "VENDAVAL_EVENTOS_CORRELATOS",
+                      "RESPONSABILIDADE_CIVIL_EMPREGADOR", "QUEBRA_DE_VIDROS"],
+}
+ESPECIFICAS = ["DETERIORACAO_MERCADORIAS_FRIGORIFICADAS", "DELIVERY", "ROUBO_FURTO_VALORES_ARROMBAMENTO", "HOME_OFFICE"]
+ASSISTENCIAS = {  # guia 10.2: acompanham o plano, não são customizáveis
+    "ESSENCIAL": ["Empresa em Apuros", "Proteção Digital"],
+    "PRATICO": ["Empresa em Apuros", "Proteção Digital", "Empresa Funcionando", "Empresa Arrumada", "Empresa Limpa"],
+    "TOTAL": ["Empresa em Apuros", "Proteção Digital", "Empresa Funcionando", "Empresa Arrumada", "Empresa Limpa",
+              "Empresa Segura", "Empresa sem Pragas", "Benefício Premium"],
+}
+VERSAO_CONTRATO = "1.1"
+TETO_BASICA = 7_500_000  # cobertura básica; acima -> Seguro Personalizado Empresarial
+
+ELETRICOS = {"EQUIPAMENTO_ELETRONICO", "EQUIPAMENTO_INFORMATICA", "EQUIPAMENTO_MEDICO", "EQUIPAMENTO_REFRIGERACAO",
+             "SISTEMA_SEGURANCA", "EQUIPAMENTO_BELEZA", "EQUIPAMENTO_COZINHA", "MAQUINA", "EQUIPAMENTO_OFICINA", "LETREIRO"}
+PORTATEIS = {"EQUIPAMENTO_ELETRONICO", "EQUIPAMENTO_INFORMATICA", "EQUIPAMENTO_MEDICO", "EQUIPAMENTO_BELEZA",
+             "EQUIPAMENTO_OFICINA", "EQUIPAMENTO_COZINHA"}
+ALTO_FURTO = {"ELETRONICOS", "VAREJO_MODA", "FARMACIA", "MERCADO"}
+RC_FATOR = {"RESTAURANTE": 4, "CLINICA": 6, "FARMACIA": 4, "BELEZA": 4, "MERCADO": 4, "ESCOLA_CURSO": 6,
+            "ELETRONICOS": 3, "OFICINA": 4, "ESCRITORIO": 2, "VAREJO_MODA": 3}
+FRENTE = {"LOJA_RUA": 0.9, "TERREO": 0.9, "GALERIA": 0.5, "SALA_COMERCIAL": 0.3, "GALPAO": 0.4, "BOX": 0.3}
+M2_CONSTR = {"ECONOMICO": (2000, 3000), "NORMAL": (3000, 4500), "SUPERIOR": (4500, 7000)}
+COMBUSTIVEL = ("MADEIRA", "COMBUSTIVEL", "PLASTICO", "LONA", "PALHA")
+
+
+def r(x, step=500):
+    """arredonda para múltiplo de step e devolve inteiro (apenas número)."""
+    return int(round(float(x) / step) * step)
+
+
+def tipo_local(row):
+    c = str(row.complemento).upper()
+    if "GALERIA" in c or row.possui_termo_galeria == "SIM": return "GALERIA"
+    if "TORRE" in c or "SALA" in c or "CONJUNTO" in c or row.possui_termo_torre == "SIM" or row.possui_termo_sala == "SIM": return "SALA_COMERCIAL"
+    if "GALPAO" in c or "DEPOSITO" in c or "UNIDADE" in c: return "GALPAO"
+    if "BOX" in c: return "BOX"
+    if "TERREO" in c: return "TERREO"
+    if "LOJA" in c or row.possui_termo_loja == "SIM": return "LOJA_RUA"
+    return "INDEFINIDO"
+
+
+def carregar(cfg):
+    L = lambda k: pd.read_csv(os.path.join(UP, cfg["pasta"], cfg[k] + ".csv"))
+    emp, end, sin, ter, bens, tpl = (L(k) for k in ["emp", "end", "sin", "ter", "bens", "tpl"])
+    d = (end.merge(sin, on=["imovel_id", "empresa_id"], how="left", validate="1:1")
+            .merge(emp, on="empresa_id", how="left", validate="m:1"))
+    return d, bens, tpl, ter
+
+
+# ============================ referências (aprendidas da base, 1 vez) ============================
+def _X_area(d, ref):
+    cols = [np.ones(len(d)), np.log1p(d.energia_media_mensal_6m), np.log1p(d.folha_pagamento_mensal)]
+    for a in ref["atividades"]: cols.append((d.grupo_atividade == a).astype(float))
+    for t in ref["tipos"]: cols.append((d.tipo_loc == t).astype(float))
+    return np.column_stack(cols)
+
+
+def ajustar_area(df):
+    """Regressão log-linear (OLS) da área nos casos com área de laudo; fallback por atividade."""
+    known = df.area_cadastrada_m2 > 0
+    ref = dict(atividades=[str(a) for a in sorted(df.grupo_atividade.unique())[1:]],
+               tipos=[str(t) for t in sorted(df.tipo_loc.unique())[1:]])
+    Xk, yk = _X_area(df[known], ref), np.log(df.loc[known, "area_cadastrada_m2"].values)
+    beta, *_ = np.linalg.lstsq(Xk, yk, rcond=None)
+    res = yk - Xk @ beta
+    sd = float(res.std(ddof=Xk.shape[1])) if known.sum() > Xk.shape[1] + 5 else 0.6
+    r2 = 1 - res.var() / yk.var()
+    ref.update(beta=beta.tolist(), sd=sd, r2_log=round(float(r2), 3), n_known=int(known.sum()))
+    return ref
+
+
+def estimar_area(df, ref):
+    """Aplica o modelo de área salvo: laudo ±10% quando existe; senão predição ± 1 desvio (escala log)."""
+    known = df.area_cadastrada_m2 > 0
+    pred = np.exp(_X_area(df, ref) @ np.array(ref["beta"]))
+    sd = ref["sd"]
+    amed = np.where(known, df.area_cadastrada_m2, pred)
+    amin = np.where(known, df.area_cadastrada_m2 * 0.9, pred * np.exp(-sd))
+    amax = np.where(known, df.area_cadastrada_m2 * 1.1, pred * np.exp(sd))
+    clip = lambda a: np.clip(a, 15, 1500)
+    return clip(amed), clip(amin), clip(amax)
+
+
+def _ibge(v):
+    """Chave estável do município (int ou float vindo do CSV)."""
+    return str(int(v)) if pd.notna(v) else ""
+
+
+def ajustar_referencias(d):
+    """Tudo que depende da base inteira: modelo de área e aluguel de referência por m² (município x tipo de local)."""
+    area = ajustar_area(d)
+    amed, _, _ = estimar_area(d, area)
+    loc = d.valor_aluguel_recorrente > 0
+    rpm = pd.DataFrame(dict(ibge=d.codigo_ibge_municipio[loc].map(_ibge), tipo=d.tipo_loc[loc],
+                            rpm=d.valor_aluguel_recorrente[loc] / amed[loc.values]))
+    rpm_mt = rpm.groupby(["ibge", "tipo"]).rpm.median()
+    return dict(area=area,
+                rpm_mt={f"{i}|{t}": float(v) for (i, t), v in rpm_mt.items()},
+                rpm_t={str(t): float(v) for t, v in rpm.groupby("tipo").rpm.median().items()},
+                rpm_all=float(rpm.rpm.median()))
+
+
+def carregar_referencias(tag):
+    return json.load(open(f"{OUT}/{tag}/referencias.json"))
+
+
+# ============================ preparação do caso ============================
+BENS_COLS = ["bens_min", "bens_max", "elet_min", "elet_max", "port_min", "port_max", "let_min", "let_max",
+             "n_bens", "tem_eletr_semroubo", "val_baixa", "val_tot", "n_baixa"]
+
+
+def _agregar_bens(g):
+    return pd.Series(dict(
+        bens_min=g.loc[g.ok, "valor_bem_ponderado_referencia"].sum(),
+        bens_max=g.loc[g.probabilidade_bem_no_imovel_referencia >= 0.48, "valor_cadastrado"].sum(),
+        elet_min=g.loc[g.elet & g.ok, "valor_bem_ponderado_referencia"].sum(),
+        elet_max=g.loc[g.elet & (g.probabilidade_bem_no_imovel_referencia >= 0.48), "valor_cadastrado"].sum(),
+        port_min=g.loc[g.port & g.ok, "valor_bem_ponderado_referencia"].sum(),
+        port_max=g.loc[g.port & (g.probabilidade_bem_no_imovel_referencia >= 0.48), "valor_cadastrado"].sum(),
+        let_min=g.loc[g.tipo_bem == "LETREIRO", "valor_bem_ponderado_referencia"].sum(),
+        let_max=g.loc[g.tipo_bem == "LETREIRO", "valor_cadastrado"].sum(),
+        n_bens=len(g), tem_eletr_semroubo=int(g.elet.any()),
+        val_baixa=g.loc[g.nivel_confianca_vinculo == "BAIXA", "valor_cadastrado"].sum(),
+        val_tot=g.valor_cadastrado.sum(), n_baixa=int((g.nivel_confianca_vinculo == "BAIXA").sum())))
+
+
+def preparar(d, bens, refs=None):
+    """Sinais derivados por estabelecimento. d deve conter todas as unidades de cada empresa (rateio).
+    Sem refs (modo lote), as referências são ajustadas sobre o próprio d."""
+    d = d.copy()
+    d["tipo_loc"] = d.apply(tipo_local, axis=1)
+    # --- alocação empresa -> estabelecimento (folha como chave de rateio)
+    tot_folha = d.groupby("empresa_id").folha_pagamento_mensal.transform("sum").replace(0, np.nan)
+    share = (d.folha_pagamento_mensal / tot_folha).fillna(1 / d.groupby("empresa_id").imovel_id.transform("count"))
+    d["fat_un"] = d.faturamento_mensal * share
+    d["func_un"] = np.maximum(1, np.round(d.quantidade_funcionarios_estimada * share)).astype(int)
+    d["multi"] = d.groupby("empresa_id").imovel_id.transform("count") > 1
+    if refs is None: refs = ajustar_referencias(d)
+    d["amed"], d["amin"], d["amax"] = estimar_area(d, refs["area"])
+    d["area_imputada"] = d.area_cadastrada_m2 <= 0
+    # --- bens por imóvel
+    b = bens[bens.imovel_id_referencia.isin(d.imovel_id)].copy()
+    b["elet"] = b.tipo_bem.isin(ELETRICOS); b["port"] = b.tipo_bem.isin(PORTATEIS)
+    b["ok"] = b.nivel_confianca_vinculo.isin(["ALTA", "MEDIA"])
+    ba = (b.groupby("imovel_id_referencia").apply(_agregar_bens, include_groups=False) if len(b)
+          else pd.DataFrame(columns=BENS_COLS, dtype=float))
+    d = d.merge(ba, left_on="imovel_id", right_index=True, how="left")
+    for c in ba.columns: d[c] = d[c].fillna(0)
+    d["share_baixa"] = np.where(d.val_tot > 0, d.val_baixa / d.val_tot.replace(0, np.nan), 0)
+    d["share_baixa"] = d.share_baixa.fillna(0)
+    return d, refs
+
+
+# ============================ confirmação (respostas do cliente/gerente) ============================
+# Cada resposta altera o sinal correspondente ANTES de decidir(): plano, faixas, confiança e perguntas se recalculam.
+# id da pergunta -> (tipo, sinais que passam a CONFIRMADO)
+RESPOSTAS_ACEITAS = {
+    "elegibilidade_local": ("booleano", ["condicoes_aceitacao_local"]),
+    "impedimento_resolvido": ("booleano", ["impedimento_resolvido"]),
+    "relacao_imovel": ("opcao", ["relacao_imovel", "aluguel_mensal"]),
+    "area_m2": ("numero", ["area_m2"]),
+    "endereco_cnpj": ("booleano", ["endereco_cnpj_compativel"]),
+    "bens_baixa_confianca": ("booleano", ["bens_vinculados"]),
+    "faturamento_despesas": ("numero", ["faturamento_mensal_unidade", "despesa_fixa_mensal"]),
+    "refrigeracao": ("booleano", ["refrigeracao"]),
+    "delivery": ("booleano", ["delivery"]),
+    "valores_em_caixa": ("booleano", ["valores_em_caixa"]),
+    "valor_reposicao": ("numero", ["valor_reposicao"]),
+}
+PERGUNTA_META = {  # campos extras para as jornadas montarem o formulário
+    "relacao_imovel": dict(opcoes=["PROPRIETARIO", "LOCATARIO"], campos=["aluguel_mensal"]),
+    "faturamento_despesas": dict(campos=["faturamento_mensal", "despesa_fixa_mensal"]),
+}
+
+
+def _bool(k, v):
+    if isinstance(v, bool): return v
+    s = str(v).strip().upper()
+    if s in ("SIM", "S", "TRUE", "1"): return True
+    if s in ("NAO", "NÃO", "N", "FALSE", "0"): return False
+    raise ValueError(f"Resposta inválida para '{k}': use SIM ou NAO")
+
+
+def _num(k, v, positivo=True):
+    try: f = float(v)
+    except (TypeError, ValueError): raise ValueError(f"Resposta inválida para '{k}': informe um número")
+    if not np.isfinite(f) or f < 0 or (positivo and f == 0): raise ValueError(f"Resposta inválida para '{k}': valor fora do intervalo")
+    return f
+
+
+def aplicar_respostas(x, respostas):
+    """Devolve (caso ajustado, respostas normalizadas, ids ignorados). Não altera o caso original."""
+    y = SimpleNamespace(**(x._asdict() if hasattr(x, "_asdict") else vars(x)))
+    ok, ignoradas = {}, []
+    for k, v in (respostas or {}).items():
+        if k not in RESPOSTAS_ACEITAS or v is None or v == "":
+            ignoradas.append(k); continue
+        if k == "elegibilidade_local":
+            ok[k] = y.elegibilidade_local = _bool(k, v)
+        elif k == "impedimento_resolvido":
+            ok[k] = _bool(k, v)
+            if ok[k]: y.situacao_imovel_cadastral = "REGULAR"
+        elif k == "relacao_imovel":
+            rel, aluguel = (v.get("relacao"), v.get("aluguel_mensal")) if isinstance(v, dict) else (v, None)
+            rel = {"PROPRIO": "PROPRIETARIO", "ALUGADO": "LOCATARIO"}.get(str(rel).upper(), str(rel).upper())
+            if rel not in ("PROPRIETARIO", "LOCATARIO"): raise ValueError("Resposta inválida para 'relacao_imovel': use PROPRIETARIO ou LOCATARIO")
+            if rel == "LOCATARIO":
+                aluguel = _num("aluguel_mensal", aluguel) if aluguel not in (None, "") else float(y.valor_aluguel_recorrente)
+                if aluguel <= 0: raise ValueError("Informe o aluguel mensal para o estabelecimento alugado")
+                y.pagamento_aluguel_recorrente, y.valor_aluguel_recorrente = "SIM", aluguel
+                ok[k] = dict(relacao=rel, aluguel_mensal=aluguel)
+            else:
+                y.pagamento_aluguel_recorrente, y.valor_aluguel_recorrente = "NAO", 0.0
+                ok[k] = dict(relacao=rel)
+        elif k == "area_m2":
+            a = ok[k] = _num(k, v)
+            y.area_cadastrada_m2, y.amed, y.amin, y.amax, y.area_imputada = a, a, 0.9 * a, 1.1 * a, False
+            y.area_confirmada = True
+        elif k == "endereco_cnpj":
+            ok[k] = _bool(k, v); y.endereco_cnpj_compativel = "SIM" if ok[k] else "NAO"
+        elif k == "bens_baixa_confianca":
+            ok[k] = _bool(k, v)  # os bens são reagregados em recomendar_imovel (dependem da base de bens)
+        elif k == "faturamento_despesas":
+            if not isinstance(v, dict): raise ValueError("Resposta inválida para 'faturamento_despesas': informe faturamento_mensal e/ou despesa_fixa_mensal")
+            ok[k] = {}
+            if v.get("faturamento_mensal") not in (None, ""):
+                y.fat_un = ok[k]["faturamento_mensal"] = _num("faturamento_mensal", v["faturamento_mensal"])
+                if not y.multi: y.faturamento_mensal = y.fat_un
+                y.confianca_faturamento = "ALTA"
+            if v.get("despesa_fixa_mensal") not in (None, ""):
+                y.despesa_fixa_mensal_estimada = ok[k]["despesa_fixa_mensal"] = _num("despesa_fixa_mensal", v["despesa_fixa_mensal"])
+            if not ok[k]: del ok[k]; ignoradas.append(k); continue
+            y.financeiro_confirmado = True
+        elif k == "refrigeracao":
+            ok[k] = _bool(k, v); y.probabilidade_refrigeracao_referencia = 1.0 if ok[k] else 0.0
+        elif k == "delivery":
+            ok[k] = _bool(k, v); y.probabilidade_delivery_referencia = 1.0 if ok[k] else 0.0
+            if not ok[k]: y.percentual_receita_delivery_est = 0.0
+        elif k == "valores_em_caixa":
+            ok[k] = y.valores_em_caixa = _bool(k, v)
+        elif k == "valor_reposicao":
+            ok[k] = y.valor_reposicao = _num(k, v)
+    y.respondidas = set(ok)
+    return y, ok, ignoradas
+
+
+def _aplicar_bens(bens, imovel_id, incluir):
+    """Bens de vínculo BAIXO confirmados no endereço passam a contar integralmente; negados saem do cálculo."""
+    m = (bens.imovel_id_referencia == imovel_id) & (bens.nivel_confianca_vinculo == "BAIXA")
+    if not incluir: return bens[~m]
+    bens = bens.copy()
+    bens.loc[m, "nivel_confianca_vinculo"] = "ALTA"
+    bens.loc[m, "probabilidade_bem_no_imovel_referencia"] = 1.0
+    bens.loc[m, "valor_bem_ponderado_referencia"] = bens.loc[m, "valor_cadastrado"]
+    return bens
+
+
+# ============================ motor (1 caso) ============================
+# Origem de cada sinal (guia, seção 3): OBSERVADO = cadastral/disponível; DERIVADO = fórmula documentada;
+# ESTIMADO = sugestão a partir de sinais e premissas; CONFIRMADO = informado pelo cliente/gerente.
+def _sinal(valor, origem, fonte, **extra):
+    v = valor.item() if hasattr(valor, "item") else valor
+    return dict(valor=round(v, 2) if isinstance(v, float) else v, origem=origem, fonte=fonte, **extra)
+
+
+def sinais(x, locatario, relacao, loc, n, fat, refrig, deliv, cash_heavy):
+    area = (_sinal(float(x.area_cadastrada_m2), "OBSERVADO", "area_cadastrada_m2 (laudo)") if not x.area_imputada else
+            _sinal(float(x.amed), "ESTIMADO", "regressão sobre energia, folha, atividade e tipo de local",
+                   faixa=[round(float(x.amin)), round(float(x.amax))]))
+    return dict(
+        tipo_local=_sinal(loc, "DERIVADO", "termos do complemento do endereço"),
+        relacao_imovel=_sinal(relacao, "DERIVADO", "pagamento_aluguel_recorrente"),
+        aluguel_mensal=_sinal(float(x.valor_aluguel_recorrente), "OBSERVADO", "valor_aluguel_recorrente") if locatario else None,
+        area_m2=area,
+        faturamento_mensal_unidade=_sinal(float(fat), "DERIVADO" if x.multi else "OBSERVADO",
+                                          "faturamento da empresa rateado pela folha" if x.multi else "faturamento_mensal",
+                                          confianca=x.confianca_faturamento),
+        empregados_unidade=_sinal(int(n), "ESTIMADO", "quantidade_funcionarios_estimada" + (" rateada pela folha" if x.multi else "")),
+        estoque_medio=_sinal(float(x.estoque_medio_estimado), "ESTIMADO", "estoque_medio_estimado"),
+        estoque_pico=_sinal(float(x.estoque_pico_estimado), "ESTIMADO", "estoque_pico_estimado"),
+        despesa_fixa_mensal=_sinal(float(x.despesa_fixa_mensal_estimada), "ESTIMADO", "despesa_fixa_mensal_estimada"),
+        refrigeracao=_sinal(bool(refrig), "ESTIMADO", f"probabilidade_refrigeracao_referencia={x.probabilidade_refrigeracao_referencia:.2f}"),
+        delivery=_sinal(bool(deliv), "ESTIMADO", f"probabilidade_delivery_referencia={x.probabilidade_delivery_referencia:.2f}"),
+        valores_em_caixa=_sinal(bool(cash_heavy), "ESTIMADO", f"percentual_recebimentos_digitais={x.percentual_recebimentos_digitais:.2f}"),
+        endereco_cnpj_compativel=_sinal(x.endereco_cnpj_compativel == "SIM", "OBSERVADO", "endereco_cnpj_compativel"),
+        bens_vinculados=_sinal(int(x.n_bens), "OBSERVADO", "bens_cadastrados", pct_valor_baixa_confianca=round(float(x.share_baixa), 2)),
+    )
+
+
+def grupo_cobertura(nome):
+    if nome in FIXAS: return "FIXA"
+    if nome in PLANO_COB["TOTAL"]: return "PADRAO_DO_PLANO"
+    if nome in ESPECIFICAS: return "ESPECIFICA_DA_ATIVIDADE"
+    return "OPCIONAL"
+
+
+def _cob(c):
+    return dict(nome=c["cobertura"], grupo=grupo_cobertura(c["cobertura"]), min=c["faixa_valor_min"], max=c["faixa_valor_max"],
+                confianca=c["confianca_estimativa"], dados=c["dados_utilizados"], regra=c["regra_calculo_utilizada"],
+                justificativa=c["justificativa"], a_confirmar=c["informacao_a_confirmar"], observacao=c["observacao"])
+
+
+def _alternativa(plano, alt, C, C_alt):
+    """Plano alternativo: o que entra e o que sai em relação ao recomendado."""
+    nomes = {c["cobertura"] for c in C}
+    mantidas = {"OPCIONAL"} | ({"ESPECIFICA_DA_ATIVIDADE"} if alt != "ESSENCIAL" else set())  # específicas só no Prático/Total
+    base = set(PLANO_COB[alt]) | {c["cobertura"] for c in C_alt} | {c for c in nomes if grupo_cobertura(c) in mantidas}
+    entram = [_cob(c) for c in C_alt if c["cobertura"] in base]
+    saem = [c for c in [c["cobertura"] for c in C] if c not in base]
+    partes = ([f"adiciona {', '.join(c['nome'] for c in entram)}"] if entram else []) + ([f"remove {', '.join(saem)}"] if saem else [])
+    sentido = "mais proteção" if ["ESSENCIAL", "PRATICO", "TOTAL"].index(alt) > ["ESSENCIAL", "PRATICO", "TOTAL"].index(plano) else "pacote mais enxuto"
+    return dict(plano=alt, sentido=sentido, coberturas_adicionadas=entram, coberturas_removidas=saem,
+                assistencias=ASSISTENCIAS[alt], tradeoff=f"{alt}: {sentido}; " + "; ".join(partes) + ".")
+
+
+def recomendar(x, refs, respostas=None):
+    """Motor: um estabelecimento preparado -> recomendação (JSON). Não lê nem escreve arquivos.
+    O mesmo contrato atende lote, atendimento assistido e agente; 'template' traz as linhas no formato dos CSVs.
+    respostas: {id_da_pergunta: valor} (ver RESPOSTAS_ACEITAS); recalcula tudo e marca os sinais como CONFIRMADO."""
+    confirmadas, ignoradas = {}, []
+    if respostas:
+        x, confirmadas, ignoradas = aplicar_respostas(x, respostas)
+    R, C, S = decidir(x, refs)
+    sin = {k: v for k, v in S.get("sinais", {}).items() if v is not None}
+    for pid in confirmadas:
+        chaves = RESPOSTAS_ACEITAS[pid][1]
+        if pid == "faturamento_despesas":  # só o que foi efetivamente informado
+            chaves = [k for k, c in zip(chaves, ["faturamento_mensal", "despesa_fixa_mensal"]) if c in confirmadas[pid]]
+        for k in chaves:  # sinal sem equivalente na base (ex.: condições do local) entra já confirmado
+            if k in sin: sin[k] = dict(sin[k], origem="CONFIRMADO", fonte="resposta do cliente/gerente")
+            elif k not in S.get("sinais", {}): sin[k] = _sinal(confirmadas[pid], "CONFIRMADO", "resposta do cliente/gerente")
+    elegivel = R["elegivel"] == "SIM"
+    out = dict(
+        versao_contrato=VERSAO_CONTRATO,
+        ids=dict(empresa_id=str(x.empresa_id), imovel_id=str(x.imovel_id)),
+        elegivel=elegivel,
+        motivos_inelegibilidade=S["motivos"],
+        direcionamento=S.get("direcionamento"),
+        plano=S["plano"] if elegivel else None,
+        motivos_plano=S.get("motivos_plano", []),
+        assistencias=ASSISTENCIAS[S["plano"]] if elegivel else [],
+        coberturas=[_cob(c) for c in C],
+        alternativa=_alternativa(S["plano"], S["alt_plano"], C, S["coberturas_alt"]) if elegivel else None,
+        confianca_geral=R["confianca_geral"],
+        sinais=sin,
+        perguntas=S["perguntas"],
+        respostas_aplicadas=confirmadas,
+        respostas_ignoradas=ignoradas,
+        justificativa=R["justificativa_recomendacao"],
+        template=dict(resultado=R, coberturas=C),
+    )
+    return out
+
+
+def recomendar_imovel(imovel_id, d, bens, refs, respostas=None):
+    """Atalho para jornadas: recomenda um estabelecimento usando só as unidades da própria empresa + refs salvas."""
+    emp = d.loc[d.imovel_id == imovel_id, "empresa_id"].iloc[0]
+    if respostas and respostas.get("bens_baixa_confianca") not in (None, ""):
+        bens = _aplicar_bens(bens, imovel_id, _bool("bens_baixa_confianca", respostas["bens_baixa_confianca"]))
+    caso, _ = preparar(d[d.empresa_id == emp], bens, refs)
+    return recomendar(next(caso[caso.imovel_id == imovel_id].itertuples(index=False)), refs, respostas)
+
+
+# ============================ lote (todos os casos -> templates) ============================
+def processar(tag):
+    t0 = time.time()
+    cfg = DATASETS[tag]
+    d, bens, tpl, ter = carregar(cfg)
+    d, refs = preparar(d, bens)
+    res, cob = [], []
+    for row in d.itertuples(index=False):
+        rec = recomendar(row, refs)["template"]
+        res.append(rec["resultado"]); cob.extend(rec["coberturas"])
+    res = pd.DataFrame(res); cob = pd.DataFrame(cob)
+    # alinhar com o template (mesma ordem/colunas)
+    out = tpl[["empresa_id", "imovel_id"]].merge(res, on=["empresa_id", "imovel_id"], how="left")
+    out = out[list(tpl.columns)]
+    cob_cols = ["empresa_id", "imovel_id", "cobertura", "faixa_valor_min", "faixa_valor_max", "confianca_estimativa",
+                "dados_utilizados", "regra_calculo_utilizada", "justificativa", "informacao_a_confirmar", "observacao"]
+    cob = cob[cob_cols] if len(cob) else pd.DataFrame(columns=cob_cols)
+    os.makedirs(f"{OUT}/{tag}", exist_ok=True)
+    out.to_csv(f"{OUT}/{tag}/template_resultado_times.csv", index=False, encoding="utf-8")
+    cob.to_csv(f"{OUT}/{tag}/template_coberturas_times.csv", index=False, encoding="utf-8")
+    json.dump(refs, open(f"{OUT}/{tag}/referencias.json", "w"), indent=2, ensure_ascii=False)
+    area_info = dict(r2_log=refs["area"]["r2_log"], sd_log=round(refs["area"]["sd"], 3), n_known=refs["area"]["n_known"])
+    met = metricas(tag, d, out, cob, area_info, time.time() - t0, tpl)
+    json.dump(met, open(f"{OUT}/{tag}/metricas.json", "w"), indent=2, ensure_ascii=False)
+    return d, out, cob, met
+
+
+# ----------------------------------------------------------------------------------------------
+def decidir(x, refs):
+    ident = dict(empresa_id=x.empresa_id, imovel_id=x.imovel_id)
+    loc = x.tipo_loc
+    locatario = x.pagamento_aluguel_recorrente == "SIM"
+    relacao = "LOCATARIO" if locatario else "PROPRIETARIO"
+    # ---------------- elegibilidade (guia 10.1) ----------------
+    motivos = []
+    if x.situacao_imovel_cadastral == "EM_OBRA": motivos.append("Imóvel em construção/reforma/reconstrução (situacao_imovel_cadastral=EM_OBRA)")
+    if x.situacao_imovel_cadastral == "IRREGULAR": motivos.append("Situação cadastral IRREGULAR do imóvel (possível imóvel condenado/desapropriado/tombado)")
+    if any(k in str(x.material_parede_externa_cadastrado).upper() for k in COMBUSTIVEL): motivos.append("Parede externa em material combustível")
+    rural = any(k in str(x.descricao_cnae).lower() for k in ("agricult", "pecuari", "rural", "lavoura"))
+    if rural: motivos.append("Atividade rural")
+    if getattr(x, "elegibilidade_local", None) is False:
+        motivos.append("Condições de aceitação do local não confirmadas (parede combustível, comunidade/favela/área rural, imóvel tombado/condenado ou outra proposta BB Seguros)")
+    respondidas = getattr(x, "respondidas", set())
+    base = dict(**ident, tipo_localizacao_sugerido=loc, relacao_imovel_sugerida=relacao)
+    q_fixa = ("Confirme: (i) parede externa em material incombustível, (ii) imóvel fora de comunidade/favela/área rural "
+              "e não tombado/condenado, (iii) sem outra proposta de seguro empresarial BB Seguros para o mesmo objeto.")
+    if motivos:
+        R = dict(base, elegivel="NAO", motivo_inelegibilidade="; ".join(motivos), plano_recomendado="NAO_SE_APLICA",
+                 coberturas_recomendadas="NAO_SE_APLICA", confianca_geral="ALTA",
+                 justificativa_recomendacao="[DISPONIVEL] " + "; ".join(motivos) + ". Regra do guia: não elegível; não há recomendação de plano nem faixas. "
+                 "[SUGESTAO] Reavaliar quando o impedimento cessar.",
+                 perguntas_confirmacao="A obra/reforma foi concluída e há habite-se/regularização do imóvel? Se sim, reenviar para nova análise.",
+                 fontes_publicas_adicionais="NAO_UTILIZADA")
+        Qi = [] if "impedimento_resolvido" in respondidas or not any(m.startswith(("Imóvel em construção", "Situação cadastral")) for m in motivos) \
+            else [dict(id="impedimento_resolvido", tipo="booleano", texto=R["perguntas_confirmacao"])]
+        if not Qi and respondidas: R["perguntas_confirmacao"] = ""
+        return R, [], dict(motivos=motivos, perguntas=Qi)
+
+    # ---------------- sinais derivados ----------------
+    fat, n = x.fat_un, x.func_un
+    est_med, est_pico = x.estoque_medio_estimado, x.estoque_pico_estimado
+    cnpj_ok = x.endereco_cnpj_compativel == "SIM"
+    decl = x.despesa_fixa_mensal_estimada
+    recomp = x.folha_pagamento_mensal + x.valor_aluguel_recorrente + x.energia_media_mensal_6m + x.pagamentos_software_mensais
+    incons_fin = (decl > x.faturamento_mensal) if not x.multi else False
+    incons_comp = decl < recomp * 0.95
+    if x.multi:
+        tot = x.faturamento_mensal; incons_fin = False  # consolidado por empresa não é comparável por unidade
+    if getattr(x, "financeiro_confirmado", False): incons_fin = incons_comp = False  # valores confirmados prevalecem
+    # prédio (somente proprietário)
+    padr = x.padrao_construtivo_cadastrado
+    cmin, cmax = M2_CONSTR.get(padr, (2500, 5000))
+    pred_min = x.amin * cmin * (0.5 if loc in ("SALA_COMERCIAL", "GALERIA", "BOX") else 1.0)
+    pred_max = x.amax * cmax * (0.5 if loc in ("SALA_COMERCIAL", "GALERIA", "BOX") else 1.0)
+    cont_min = est_med + x.bens_min
+    cont_max = max(est_pico + x.bens_max, cont_min)
+    if not locatario:
+        inc_min, inc_max = cont_min + pred_min, cont_max + pred_max
+        objeto = "prédio+conteúdo"
+    else:
+        inc_min, inc_max = cont_min, cont_max
+        objeto = "conteúdo (prédio é do locador)"
+    inc_min, inc_max = max(inc_min, 20000), max(inc_max, inc_min * 1.3, 40000)
+    if getattr(x, "valor_reposicao", None):  # valor de reposição confirmado substitui a estimativa (±10%)
+        inc_min, inc_max = 0.9 * x.valor_reposicao, 1.1 * x.valor_reposicao
+    acima_teto = inc_max > TETO_BASICA
+    if inc_min > TETO_BASICA:  # fora do produto: direcionar ao Seguro Personalizado Empresarial
+        mot = "Estimativa mínima de incêndio acima de R$ 7,5 mi: direcionar ao Seguro Personalizado Empresarial"
+        return dict(**ident, tipo_localizacao_sugerido=loc, relacao_imovel_sugerida=relacao, elegivel="NAO", motivo_inelegibilidade=mot,
+                    plano_recomendado="NAO_SE_APLICA", coberturas_recomendadas="NAO_SE_APLICA", confianca_geral="MEDIA",
+                    justificativa_recomendacao="[SUGESTAO] " + mot + ".", perguntas_confirmacao="Confirme o valor de reposição de prédio e conteúdo.",
+                    fontes_publicas_adicionais="NAO_UTILIZADA"), [], dict(
+                    motivos=[mot], direcionamento="SEGURO_PERSONALIZADO_EMPRESARIAL",
+                    perguntas=[] if "valor_reposicao" in respondidas else [dict(id="valor_reposicao", tipo="numero", texto="Confirme o valor de reposição de prédio e conteúdo.")])
+    if acima_teto: inc_max = TETO_BASICA
+    # ---------------- plano ----------------
+    vend_rel = loc in ("LOJA_RUA", "TERREO", "GALPAO")
+    theft_rel = (x.grupo_atividade in ALTO_FURTO) or (est_pico + x.port_max >= 100000) or (loc in ("LOJA_RUA", "TERREO") and est_pico >= 30000)
+    vidro_rel = loc in ("LOJA_RUA", "TERREO", "GALERIA")
+    emp_rel = n >= 5
+    refrig = x.probabilidade_refrigeracao_referencia >= 0.5
+    deliv = (x.probabilidade_delivery_referencia >= 0.4) or (x.percentual_receita_delivery_est >= 0.15)
+    cash_heavy = getattr(x, "valores_em_caixa", None)
+    if cash_heavy is None: cash_heavy = x.percentual_recebimentos_digitais <= 0.5 and x.grupo_atividade in ("MERCADO", "FARMACIA", "RESTAURANTE", "BELEZA", "VAREJO_MODA", "OFICINA", "ELETRONICOS")
+    espec = refrig or deliv or cash_heavy
+    if vidro_rel and emp_rel and (theft_rel or vend_rel):
+        plano = "TOTAL"
+    elif theft_rel or vend_rel or espec:
+        plano = "PRATICO"
+    else:
+        plano = "ESSENCIAL"
+    motivos_plano = []
+    if theft_rel: motivos_plano.append("exposição a roubo/furto (atividade/estoque/bens portáteis)")
+    if vend_rel: motivos_plano.append(f"local {loc} exposto a vendaval")
+    if espec: motivos_plano.append("coberturas específicas da atividade só existem no Prático/Total")
+    if plano == "TOTAL": motivos_plano.append(f"fachada/vitrine ({loc}) e {n} empregados na unidade justificam quebra de vidros e RC empregador")
+    if plano == "ESSENCIAL": motivos_plano.append("sem sinais de exposição a furto/vendaval/vitrine; perfil de baixo estoque/escritório")
+    # alternativa única para comparação: o Prático compara com o Total, salvo quando só as específicas da atividade o justificam
+    alt_plano = {"TOTAL": "PRATICO", "ESSENCIAL": "PRATICO",
+                 "PRATICO": "TOTAL" if (theft_rel or vend_rel) else "ESSENCIAL"}[plano]
+    alt = {("TOTAL", "PRATICO"): "PRATICO (sem quebra de vidros e RC empregador)",
+           ("PRATICO", "TOTAL"): "TOTAL (adiciona quebra de vidros e RC empregador)",
+           ("PRATICO", "ESSENCIAL"): "ESSENCIAL (sem furto/vendaval e sem as coberturas específicas da atividade)",
+           ("ESSENCIAL", "PRATICO"): "PRATICO (adiciona furto e vendaval)"}[(plano, alt_plano)]
+    pratico_plus = lambda p: p in ("PRATICO", "TOTAL")
+
+    C, C_alt = [], []
+    def add(nome, mn, mx, conf, dados, regra, just, conf_info, obs="", dest=None):
+        mn, mx = r(mn, 500), r(mx, 500)
+        if mx < mn: mx = mn
+        (C if dest is None else dest).append(dict(**ident, cobertura=nome, faixa_valor_min=mn, faixa_valor_max=mx, confianca_estimativa=conf,
+                      dados_utilizados=dados, regra_calculo_utilizada=regra, justificativa=just,
+                      informacao_a_confirmar=conf_info, observacao=obs))
+
+    c_area = "ALTA" if not x.area_imputada else "BAIXA"
+    c_bens = "BAIXA" if x.share_baixa > 0.4 or x.n_bens == 0 else ("ALTA" if x.share_baixa < 0.15 else "MEDIA")
+    ordem = {"ALTA": 3, "MEDIA": 2, "BAIXA": 1}; inv = {3: "ALTA", 2: "MEDIA", 1: "BAIXA"}
+    minc = lambda *a: inv[min(ordem[i] for i in a)]
+    c_fat = x.confianca_faturamento
+    area_txt = (f"área {x.area_cadastrada_m2:.0f} m² ({'confirmada' if getattr(x, 'area_confirmada', False) else 'laudo'})" if not x.area_imputada
+                else f"área imputada {x.amed:.0f} m² (faixa {x.amin:.0f}-{x.amax:.0f}; regressão sobre energia, folha, atividade e tipo de local)")
+
+    # --- fixas
+    add("INCENDIO_RAIO_EXPLOSAO_FUMACA", inc_min, inc_max, minc(c_area if not locatario else "ALTA", c_bens),
+        f"estoque_medio/pico; bens ponderados/cadastrados (prob>=0.48); {area_txt}; relação={relacao}; padrão={padr}",
+        f"min = estoque_médio + bens ALTA/MÉDIA ponderados{' + prédio (área mín × R$'+str(cmin)+'/m²)' if not locatario else ''}; "
+        f"max = estoque_pico + bens (prob≥0.48, valor cadastrado){' + prédio (área máx × R$'+str(cmax)+'/m²)' if not locatario else ''}; piso 20k/40k",
+        f"Objeto segurado: {objeto}. Faixa máxima R$ {r(inc_max)}" + (" limitada ao teto de R$ 7,5 mi da cobertura básica; acima disso, Seguro Personalizado Empresarial." if acima_teto else " dentro do teto de R$ 7,5 mi da cobertura básica."),
+        "Valor de reposição do prédio e do conteúdo; relação com o imóvel" if not locatario else "Valor de reposição do conteúdo; endereço dos bens de baixa confiança",
+        "Custo/m² é premissa interna (CUB não consultado)" if not locatario else "")
+    el_min = x.elet_min; el_max = max(x.elet_max, el_min)
+    if el_max <= 0:
+        el_min, el_max = 12 * x.energia_media_mensal_6m * 0.5, 36 * x.energia_media_mensal_6m
+        rg, dd, cf = "sem bens elétricos: min = 6×energia mensal; max = 36×energia mensal", "energia_media_mensal_6m", "BAIXA"
+    else:
+        rg, dd, cf = "min = bens elétricos/equipamentos ALTA/MÉDIA ponderados; max = valor cadastrado (prob≥0.48)", "bens_cadastrados (tipos elétricos), probabilidade de vínculo", c_bens
+    add("DANOS_ELETRICOS", max(el_min, 10000), max(el_max, el_min * 1.3, 20000), cf, dd, rg + "; piso 10k/20k",
+        "Equipamentos dependentes de energia elétrica no estabelecimento.", "Lista de equipamentos eletrônicos/refrigeração e valores de reposição")
+    if locatario:
+        a_min, a_max = 3 * x.valor_aluguel_recorrente, 12 * x.valor_aluguel_recorrente
+        add("PERDA_PAGAMENTO_ALUGUEL", a_min, a_max, "ALTA", "valor_aluguel_recorrente", "min = 3 × aluguel mensal; max = 12 × aluguel mensal",
+            f"Aluguel recorrente observado de R$ {x.valor_aluguel_recorrente:.0f}/mês; período indenitário de 3 a 12 meses.", "Valor do aluguel vigente e prazo contratual")
+    else:
+        rpm = refs["rpm_mt"].get(f"{_ibge(x.codigo_ibge_municipio)}|{loc}", np.nan)
+        origem = "mediana R$/m² de locatários no mesmo município e tipo de local"
+        if np.isnan(rpm): rpm, origem = refs["rpm_t"].get(loc, refs["rpm_all"]), "mediana R$/m² de locatários do mesmo tipo de local (sem amostra municipal)"
+        add("PERDA_PAGAMENTO_ALUGUEL", 3 * x.amin * rpm, 12 * x.amax * rpm, "BAIXA", f"{origem}; {area_txt}; sem aluguel recorrente observado",
+            "min = 3 × (área mín × R$/m² ref.); max = 12 × (área máx × R$/m² ref.)",
+            "Sem aluguel observado: relação sugerida PROPRIETÁRIO; faixa representa aluguel de reposição/perda de aluguel de referência.",
+            "Confirmar se o estabelecimento é próprio, alugado (valor do aluguel) ou cedido", "Se próprio e sem locação a terceiros, a cobertura pode ter pouca utilidade")
+    k = RC_FATOR.get(x.grupo_atividade, 3)
+    add("RESPONSABILIDADE_CIVIL_ESTABELECIMENTO", min(2_000_000, max(50000, 0.5 * k * fat)), min(2_000_000, max(100000, 1.5 * k * fat)), minc(c_fat, "MEDIA"),
+        f"faturamento alocado à unidade (R$ {fat:.0f}/mês, rateio por folha), grupo_atividade={x.grupo_atividade}",
+        f"min = {0.5*k:.1f} × faturamento mensal da unidade; max = {1.5*k:.1f} × (teto 2 mi); piso 50k/100k",
+        "Limite proporcional ao fluxo de público da atividade e ao porte da unidade.", "Fluxo diário de clientes e eventuais sinistros anteriores")
+    d_lo = decl; d_hi = max(decl, recomp)
+    add("DESPESAS_FIXAS", 1 * d_lo, 3 * d_hi, minc("MEDIA" if (incons_fin or incons_comp) else "ALTA", c_fat),
+        "despesa_fixa_mensal_estimada; folha, aluguel, energia e software mensais", "min = 1 × despesa fixa declarada; max = 3 × maior entre declarada e soma dos componentes",
+        f"Despesa fixa mensal estimada R$ {decl:.0f} (componentes observados somam R$ {recomp:.0f}); cobre 1 a 3 meses de paralisação.",
+        "Despesas fixas mensais reais e prazo máximo de reabertura",
+        "Despesa fixa > faturamento mensal da empresa: revisar" if incons_fin else "")
+    base_dig = fat * max(x.percentual_recebimentos_digitais, x.indice_receita_digital)
+    add("PROTECAO_CIBERNETICA", min(1_000_000, max(20000, base_dig)), min(1_000_000, max(50000, 3 * base_dig * (1 + x.indice_exposicao_digital))), "BAIXA" if c_fat == "MEDIA" else "MEDIA",
+        "percentual_recebimentos_digitais, indice_receita_digital, indice_exposicao_digital, faturamento da unidade",
+        "min = max(20k; 1 mês de receita digital); max = max(50k; 3 meses de receita digital × (1+exposição digital)); teto 1 mi",
+        f"Receita digital estimada R$ {base_dig:.0f}/mês; exposição digital {x.indice_exposicao_digital:.2f} (referência de dependência, não probabilidade de ataque).",
+        "Uso de maquininha/e-commerce/sistemas em nuvem e tratamento de dados de clientes", "Índice de exposição digital não mede risco cibernético")
+    # --- Prático / Total
+    if pratico_plus(plano) or pratico_plus(alt_plano):
+        dst = None if pratico_plus(plano) else C_alt
+        pt_min = 0.3 * (est_med + x.port_min); pt_max = 0.7 * (est_pico + x.port_max)
+        add("ROUBO_FURTO_ARROMBAMENTO", max(pt_min, 10000), max(pt_max, pt_min * 1.3, 20000), minc(c_bens, "MEDIA"),
+            "estoque_medio/pico; bens portáteis (eletrônicos, informática, médicos, beleza, oficina, cozinha); atividade",
+            "min = 30% × (estoque médio + portáteis ALTA/MÉDIA); max = 70% × (estoque pico + portáteis prob≥0.48); piso 10k/20k (primeiro risco)",
+            "Limite de primeiro risco proporcional ao estoque e aos bens subtraíveis.", "Sistemas de segurança existentes (alarme, câmeras, grades) e valores em estoque", dest=dst)
+        v_min = 0.4 * cont_min + (0.2 * pred_min if not locatario else 0)
+        v_max = 0.8 * cont_max + (0.5 * pred_max if not locatario else 0)
+        add("VENDAVAL_EVENTOS_CORRELATOS", max(v_min, 10000), max(v_max, v_min * 1.3, 20000), minc(c_bens, c_area if not locatario else "ALTA"),
+            f"conteúdo (estoque+bens), tipo de local {loc}" + ("; prédio estimado" if not locatario else ""),
+            "min = 40% do conteúdo mín (+20% prédio mín se próprio); max = 80% do conteúdo máx (+50% prédio máx se próprio); piso 10k/20k",
+            "Fração do patrimônio exposta a vento/granizo; sem índice territorial público utilizado.", "Tipo de cobertura/telhado e histórico de eventos climáticos no local",
+            "Sem enriquecimento territorial (INMET/Defesa Civil); faixas sensíveis ao tipo de local", dest=dst)
+    if "TOTAL" in (plano, alt_plano):
+        dst = None if plano == "TOTAL" else C_alt
+        add("RESPONSABILIDADE_CIVIL_EMPREGADOR", min(2_000_000, max(50000, 10000 * n)), min(2_000_000, max(100000, 40000 * n)), "MEDIA",
+            f"quantidade de funcionários alocada à unidade ({n}); folha da unidade", "min = max(50k; 10k × empregados); max = max(100k; 40k × empregados); teto 2 mi",
+            "Limite proporcional ao número de empregados na unidade.", "Número real de empregados (CLT/terceiros) no estabelecimento",
+            "Funcionários da empresa rateados por folha entre unidades" if x.multi else "", dest=dst)
+        fr = FRENTE.get(loc, 0.4)
+        g_min = fr * np.sqrt(x.amin) * 2.5; g_max = fr * np.sqrt(x.amax) * 2.5
+        add("QUEBRA_DE_VIDROS", max(5000, g_min * 900), max(15000, g_max * 1800), minc(c_area, "MEDIA"),
+            f"{area_txt}; tipo de local {loc}", f"vidro m² = fator frente({fr}) × √área × 2,5 m; min = m² × R$900; max = m² × R$1.800; piso 5k/15k",
+            "Vidros/vitrines/fachada proporcionais à frente estimada do imóvel.", "Metragem de vitrines/portas/janelas de vidro", dest=dst)
+    # --- adicionais aplicáveis (específicas da atividade: Prático/Total; opcionais: qualquer plano)
+    adic = []
+    esp = pratico_plus(plano) or pratico_plus(alt_plano)
+    dst = None if pratico_plus(plano) else C_alt
+    marca = lambda nome: adic.append(nome) if dst is None else None
+    if esp and refrig:
+        add("DETERIORACAO_MERCADORIAS_FRIGORIFICADAS", max(5000, 0.3 * est_med), max(10000, 0.6 * est_pico), "MEDIA" if x.probabilidade_refrigeracao_referencia >= 0.7 else "BAIXA",
+            f"probabilidade_refrigeracao_referencia={x.probabilidade_refrigeracao_referencia:.2f}; estoque_medio/pico",
+            "min = 30% estoque médio; max = 60% estoque pico (parcela refrigerada); piso 5k/10k", "Refrigeração relevante para a atividade; perda de mercadorias por falta de energia/falha do equipamento.",
+            "Possui câmaras/balcões refrigerados? Qual % do estoque é refrigerado?", dest=dst); marca("DETERIORACAO_MERCADORIAS_FRIGORIFICADAS")
+    if esp and deliv:
+        dr = fat * x.percentual_receita_delivery_est
+        add("DELIVERY", max(3000, dr / 30 * 5), max(10000, dr / 30 * 15), "BAIXA",
+            f"probabilidade_delivery_referencia={x.probabilidade_delivery_referencia:.2f}; percentual_receita_delivery_est={x.percentual_receita_delivery_est:.2f}",
+            "min = 5 dias de receita de delivery; max = 15 dias; piso 3k/10k", "Mercadorias em trânsito em entregas.", "Realiza entregas próprias? Volume médio diário", dest=dst)
+        marca("DELIVERY")
+    if esp and cash_heavy:
+        cash = fat * (1 - x.percentual_recebimentos_digitais) / 30
+        add("ROUBO_FURTO_VALORES_ARROMBAMENTO", max(1000, cash), max(5000, 3 * cash), "BAIXA",
+            f"percentual_recebimentos_digitais={x.percentual_recebimentos_digitais:.2f}; faturamento da unidade",
+            "min = 1 dia de recebimento em espécie; max = 3 dias; piso 1k/5k", "Recebimentos majoritariamente não digitais sugerem valores em caixa.", "Valor médio mantido em caixa/cofre", dest=dst)
+        marca("ROUBO_FURTO_VALORES_ARROMBAMENTO")
+    if x.let_max > 0:
+        add("LETREIROS_ANUNCIOS_LUMINOSOS", max(x.let_min, 3000), max(x.let_max, 6000), minc(c_bens, "MEDIA"), "bens_cadastrados tipo LETREIRO",
+            "min = valor ponderado; max = valor cadastrado; piso 3k/6k", "Bem do tipo letreiro cadastrado para o estabelecimento.", "Valor e localização do letreiro")
+        adic.append("LETREIROS_ANUNCIOS_LUMINOSOS")
+    if x.grupo_atividade in ("CLINICA", "ESCRITORIO", "ESCOLA_CURSO"):
+        add("RECOMPOSICAO_REGISTROS_DOCUMENTOS", max(10000, 0.1 * fat), max(30000, 0.3 * fat), "BAIXA", "grupo_atividade; faturamento da unidade",
+            "min = 10% do faturamento mensal; max = 30%; piso 10k/30k", "Atividade com guarda intensiva de prontuários/documentos.", "Existência de backup físico/digital dos registros")
+        adic.append("RECOMPOSICAO_REGISTROS_DOCUMENTOS")
+
+    # ---------------- confiança geral ----------------
+    pts = 0
+    pts += 0 if not x.area_imputada else 2
+    pts += 0 if c_bens == "ALTA" else (1 if c_bens == "MEDIA" else 2)
+    pts += 0 if c_fat == "ALTA" else 1
+    pts += 1 if not cnpj_ok else 0
+    pts += 1 if (incons_fin or incons_comp) else 0
+    pts += 1 if not locatario and "relacao_imovel" not in respondidas else 0
+    pts += 1 if x.situacao_imovel_cadastral != "REGULAR" else 0
+    conf = "ALTA" if pts <= 2 else ("MEDIA" if pts <= 4 else "BAIXA")
+
+    # ---------------- perguntas (priorizadas, máx. 4) ----------------
+    Q = [(1, q_fixa, "elegibilidade_local", "booleano")]
+    if not locatario: Q.append((2, "O estabelecimento é próprio ou alugado? Se alugado, qual o valor do aluguel e quem é o locador (beneficiário do prédio)?", "relacao_imovel", "opcao"))
+    if x.area_imputada: Q.append((3, f"Qual a área do estabelecimento em m²? (estimada em ~{x.amed:.0f} m², faixa {x.amin:.0f}-{x.amax:.0f})", "area_m2", "numero"))
+    if not cnpj_ok: Q.append((4, "O endereço do estabelecimento confere com o endereço do CNPJ/filial informado?", "endereco_cnpj", "booleano"))
+    if x.share_baixa > 0.25 and x.n_baixa: Q.append((5, f"{x.n_baixa} bem(ns) cadastrados com vínculo de baixa confiança (~{x.share_baixa:.0%} do valor): estão neste endereço?", "bens_baixa_confianca", "booleano"))
+    if incons_fin or incons_comp: Q.append((6, "Confirme faturamento mensal e despesas fixas (os valores informados estão inconsistentes entre si).", "faturamento_despesas", "numero"))
+    if 0.3 <= x.probabilidade_refrigeracao_referencia < 0.7 and plano != "ESSENCIAL": Q.append((7, "Há equipamentos de refrigeração com mercadorias perecíveis?", "refrigeracao", "booleano"))
+    if 0.2 <= x.probabilidade_delivery_referencia < 0.5: Q.append((8, "A empresa realiza entregas (delivery)?", "delivery", "booleano"))
+    if acima_teto: Q.append((0, 'Valor de reposição de prédio e conteúdo pode superar R$ 7,5 mi: confirmar para eventual direcionamento ao Seguro Personalizado Empresarial.', "valor_reposicao", "numero"))
+    Qs = sorted((q for q in Q if q[2] not in respondidas), key=lambda q: q[0])[:4]
+    Q = [q[1] for q in Qs]
+
+    ev = [f"[DISPONÍVEL] {x.grupo_atividade}, local {loc}, {n} empregados na unidade, {'aluguel R$ %.0f/mês' % x.valor_aluguel_recorrente if locatario else 'sem aluguel recorrente'}, "
+          f"estoque médio/pico R$ {est_med:.0f}/{est_pico:.0f}, {x.n_bens:.0f} bens vinculados"]
+    ev.append(f"[SUGESTÃO] plano {plano}: " + "; ".join(motivos_plano) + f". Relação sugerida: {relacao}. " +
+              (f"Área estimada ~{x.amed:.0f} m²." if x.area_imputada else f"Área {'confirmada' if getattr(x, 'area_confirmada', False) else 'de laudo'} {x.area_cadastrada_m2:.0f} m²."))
+    if respondidas: ev.append("[CONFIRMADO] " + ", ".join(sorted(respondidas)) + " (informado pelo cliente/gerente).")
+    ev.append(f"[CONFIRMAR] {len(Q)} pergunta(s) priorizada(s). Alternativa: {alt}.")
+    R = dict(base, elegivel="SIM", motivo_inelegibilidade="", plano_recomendado=plano,
+             coberturas_recomendadas="|".join(PLANO_COB[plano] + adic), confianca_geral=conf,
+             justificativa_recomendacao=" ".join(ev), perguntas_confirmacao=" | ".join(Q),
+             fontes_publicas_adicionais="NAO_UTILIZADA (sugeridas: IBGE malha municipal, INMET, Defesa Civil, SSP; ver README)")
+    S = dict(motivos=[], plano=plano, motivos_plano=motivos_plano, alt_plano=alt_plano, coberturas_alt=C_alt,
+             perguntas=[dict(id=i, tipo=t, texto=q, **PERGUNTA_META.get(i, {})) for _, q, i, t in Qs],
+             sinais=sinais(x, locatario, relacao, loc, n, fat, refrig, deliv, cash_heavy))
+    return R, C, S
+
+
+def metricas(tag, d, out, cob, area_info, tempo, tpl):
+    el = out[out.elegivel == "SIM"]
+    n = len(out)
+    cnt_perg = el.perguntas_confirmacao.str.count(r"\|") + 1
+    # consistência plano x coberturas
+    cons_ok = 0
+    for (e, i), g in cob.groupby(["empresa_id", "imovel_id"]):
+        pl = out[(out.empresa_id == e) & (out.imovel_id == i)].plano_recomendado.iloc[0]
+        cons_ok += set(PLANO_COB[pl]).issubset(set(g.cobertura))
+    faixas_ok = int(((cob.faixa_valor_min <= cob.faixa_valor_max) & cob.faixa_valor_min.notna()).sum())
+    return dict(
+        conjunto=tag, casos_template=n, casos_processados=int(out.elegivel.notna().sum()), pct_processados=round(100 * out.elegivel.notna().mean(), 2),
+        elegiveis=int((out.elegivel == "SIM").sum()), inelegiveis=int((out.elegivel == "NAO").sum()),
+        inelegiveis_por_motivo=out[out.elegivel == "NAO"].motivo_inelegibilidade.value_counts().to_dict(),
+        distribuicao_planos=el.plano_recomendado.value_counts().to_dict(),
+        confianca_geral=el.confianca_geral.value_counts().to_dict(), pct_confianca_baixa=round(100 * (el.confianca_geral == "BAIXA").mean(), 2),
+        media_perguntas=round(float(cnt_perg.mean()), 2), pct_com_justificativa=round(100 * (out.justificativa_recomendacao.str.len() > 20).mean(), 2),
+        linhas_coberturas=len(cob), faixas_validas=faixas_ok, pct_faixas_validas=round(100 * faixas_ok / max(len(cob), 1), 2),
+        pct_planos_com_todas_coberturas_fixas=round(100 * cons_ok / max(len(el), 1), 2),
+        coberturas_adicionais_linhas=int((~cob.cobertura.isin(FIXAS + ["ROUBO_FURTO_ARROMBAMENTO", "VENDAVAL_EVENTOS_CORRELATOS", "RESPONSABILIDADE_CIVIL_EMPREGADOR", "QUEBRA_DE_VIDROS"])).sum()),
+        area_imputada_pct=round(100 * d.area_imputada.mean(), 1), modelo_area=area_info,
+        casos_multiunidade=int(d.multi.sum()), tempo_execucao_s=round(tempo, 2))
+
+
+if __name__ == "__main__":
+    for t in (sys.argv[1:] or list(DATASETS)):
+        _, _, _, m = processar(t)
+        print(json.dumps(m, indent=1, ensure_ascii=True))

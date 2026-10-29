@@ -5,10 +5,10 @@ Datathon Proteção Inteligente · BB Seguros · **Desafio: Seguro Empresarial**
 ## Equipe
 
 | Campo | Valor |
-|---|---|
-| Nome da equipe | _preencher_ |
-| Integrantes | _preencher (nome completo)_ |
-| Instituição / turma | _preencher, se aplicável_ |
+| --- | --- |
+| Nome da equipe | Tropa do BB |
+| Integrantes | Arthur Marques, Eduardo Augusto |
+| Instituição / turma | BB, BBTS |
 | Desafio | Seguro Empresarial |
 
 ## Objetivo
@@ -259,6 +259,29 @@ Não há métricas de acurácia: o problema não tem rótulo supervisionado. Os 
 - Enriquecimento territorial (INMET, Defesa Civil, SSP) para vendaval e furto.
 - CUB por UF para o custo de reconstrução.
 - Calibrar as regras com histórico real de contratação e sinistros.
+
+## Materiais finais da entrega
+
+O diretório [`entrega_final/`](entrega_final/) reúne somente os arquivos que devem ser enviados. As bases fornecidas pela organização, ambientes virtuais e credenciais não fazem parte do pacote.
+
+| Material | Link |
+|---|---|
+| Instruções e inventário do pacote | [`entrega_final/README.md`](entrega_final/README.md) |
+| Documentação completa dentro do pacote | [`README_PROJETO.md`](entrega_final/README_PROJETO.md) |
+| Resultado consolidado da base comum | [`template_resultado_times.csv`](entrega_final/resultados/template_resultado_times.csv) |
+| Detalhamento das coberturas | [`template_coberturas_times.csv`](entrega_final/resultados/template_coberturas_times.csv) |
+| Métricas da base comum | [`metricas.json`](entrega_final/evidencias/metricas.json) |
+| Testes de coerência e reprodutibilidade | [`testes_coerencia.json`](entrega_final/evidencias/testes_coerencia.json) |
+| Demonstração navegável | [`frontend_CASO.html`](entrega_final/demonstracao/frontend_CASO.html) |
+| Motor de recomendação | [`engine.py`](entrega_final/codigo/engine.py) |
+| Servidor e gerador do frontend | [`gerar_frontend.py`](entrega_final/codigo/gerar_frontend.py) |
+| Testes automatizados | [`testes_coerencia.py`](entrega_final/codigo/testes_coerencia.py) |
+| Dependências | [`requirements.txt`](entrega_final/codigo/requirements.txt) |
+| Versão do Python | [`.python-version`](entrega_final/codigo/.python-version) |
+| Configuração opcional do assistente | [`.env.example`](entrega_final/codigo/.env.example) |
+| Roteiro textual da apresentação | [`ROTEIRO_APRESENTACAO.md`](entrega_final/ROTEIRO_APRESENTACAO.md) |
+
+O vídeo de até 5 minutos deve ser gravado a partir do roteiro acima e seu arquivo ou link acrescentado ao pacote antes do envio definitivo.
 
 ## Relato
 

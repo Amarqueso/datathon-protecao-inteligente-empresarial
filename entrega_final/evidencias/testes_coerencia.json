@@ -1,0 +1,48 @@
+{
+  "CASO": {
+    "reprodutivel_hash_igual": true,
+    "inelegiveis_sem_cobertura": true,
+    "min<=max_pct": 100.0,
+    "sem_nulos_min_max": true,
+    "planos_aninhados": true,
+    "consistencia_plano_semelhantes(%plano modal)": 87.7,
+    "sensibilidade": {
+      "estoque+20%": {
+        "pct_troca_plano": 0.73,
+        "var_mediana_incendio_max_pct": 1.1
+      },
+      "estoque-20%": {
+        "pct_troca_plano": 0.0,
+        "var_mediana_incendio_max_pct": -1.1
+      }
+    }
+  },
+  "EMP": {
+    "reprodutivel_hash_igual": true,
+    "inelegiveis_sem_cobertura": true,
+    "min<=max_pct": 100.0,
+    "sem_nulos_min_max": true,
+    "planos_aninhados": true,
+    "consistencia_plano_semelhantes(%plano modal)": 70.2,
+    "sensibilidade": {
+      "estoque+20%": {
+        "pct_troca_plano": 0.18,
+        "var_mediana_incendio_max_pct": 1.5
+      },
+      "estoque-20%": {
+        "pct_troca_plano": 0.25,
+        "var_mediana_incendio_max_pct": -1.4
+      }
+    }
+  },
+  "confirmacao_CASO": {
+    "casos_elegiveis": 137,
+    "casos_com_area_confirmada": 83,
+    "falhas": {
+      "area_confirmada": 0,
+      "local_negado_inelegivel": 0,
+      "faixas_validas": 0,
+      "deterministico": 0
+    }
+  }
+}
