@@ -509,11 +509,13 @@ def decidir(x, refs):
     if espec: motivos_plano.append("coberturas específicas da atividade só existem no Prático/Total")
     if plano == "TOTAL": motivos_plano.append(f"fachada/vitrine ({loc}) e {n} empregados na unidade justificam quebra de vidros e RC empregador")
     if plano == "ESSENCIAL": motivos_plano.append("sem sinais de exposição a furto/vendaval/vitrine; perfil de baixo estoque/escritório")
-    alt = {"TOTAL": "PRATICO (sem quebra de vidros e RC empregador)", "PRATICO": "TOTAL (adiciona vidros e RC empregador) ou ESSENCIAL (sem furto/vendaval)",
-           "ESSENCIAL": "PRATICO (adiciona furto e vendaval)"}[plano]
     # alternativa única para comparação: o Prático compara com o Total, salvo quando só as específicas da atividade o justificam
     alt_plano = {"TOTAL": "PRATICO", "ESSENCIAL": "PRATICO",
                  "PRATICO": "TOTAL" if (theft_rel or vend_rel) else "ESSENCIAL"}[plano]
+    alt = {("TOTAL", "PRATICO"): "PRATICO (sem quebra de vidros e RC empregador)",
+           ("PRATICO", "TOTAL"): "TOTAL (adiciona quebra de vidros e RC empregador)",
+           ("PRATICO", "ESSENCIAL"): "ESSENCIAL (sem furto/vendaval e sem as coberturas específicas da atividade)",
+           ("ESSENCIAL", "PRATICO"): "PRATICO (adiciona furto e vendaval)"}[(plano, alt_plano)]
     pratico_plus = lambda p: p in ("PRATICO", "TOTAL")
 
     C, C_alt = [], []
