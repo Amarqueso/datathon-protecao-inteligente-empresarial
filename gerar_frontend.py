@@ -618,7 +618,7 @@ def api_chat():
                         itens.append({"role": item["role"], "content": conteudo})
         itens.append({"role": "user", "content": pergunta})
         # Chat Completions funciona na OpenAI e nos provedores compatíveis (Gemini, Groq), via OPENAI_BASE_URL
-        api_client = OpenAI()
+        api_client = OpenAI(timeout=60, max_retries=1)  # abaixo do timeout do gunicorn
         resposta = api_client.chat.completions.create(model=MODEL, messages=itens, max_tokens=2000)
         return jsonify({"answer": resposta.choices[0].message.content or "Não consegui gerar uma resposta."})
     except FileNotFoundError as exc:

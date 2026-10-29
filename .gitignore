@@ -20,6 +20,7 @@ Thumbs.db
 .env
 *.key
 *.pem
+*.swp
 
 # ---------- Dados de entrada da organização ----------
 # Ignorados por padrão: a redistribuição pode não ser permitida.
